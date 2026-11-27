@@ -135,6 +135,18 @@ class Relay:
         # 全局会话编号：多节点各自从 1 数会撞号，由 relay 统一分配。
         self.seq = 0
 
+        # 无主会话（归属机制上线前建的、或 relay 重启把表弄丢的）统一认给第一个
+        # 带 client 参数连上的控制端。这样「共享」标签永远只出现在非主人那一端，
+        # 不会出现两个窗口都标共享的情况。
+        self.default_claimant: str = ""
+        self.claimant_primary = False
+        # 哪些会话的归属是"认领"来的（不是真的由某个客户端创建）。换主人时只迁移这些，
+        # 真正被别人创建的会话不能跟着跑。
+        self.sid_claimed: Set[str] = set()
+        # 归属与编号落盘，relay 重启不再把这些状态清零。
+        self.state_file = os.environ.get("RPTY_STATE_FILE", "/data/relay-state.json")
+        self._load_state()
+
         self.started_at = time.time()
         self.stats = {
             "sessions_opened": 0,
@@ -212,6 +224,88 @@ class Relay:
         else:
             await ws.close(code=4004, reason="unknown route")
 
+    # ------------------------------------------------------------ 状态落盘
+
+    def _load_state(self) -> None:
+        """启动时把上次的归属、编号、认领者读回来。
+
+        没有这个，relay 每重启一次，所有终端就"换一次主人"：编号从头数、
+        归属全清空，用户看到的就是两个窗口都标共享。
+        """
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception as exc:  # 文件坏了不该拦住 relay 启动
+            LOG.warning("状态文件读取失败：%s", exc)
+            return
+
+        owners = data.get("owners") or {}
+        if isinstance(owners, dict):
+            self.sid_owner.update({str(k): str(v) for k, v in owners.items() if k and v})
+        index = data.get("index") or {}
+        if isinstance(index, dict):
+            for k, v in index.items():
+                try:
+                    self.sid_index[str(k)] = int(v)
+                except (TypeError, ValueError):
+                    continue
+        claimant = data.get("claimant") or ""
+        if isinstance(claimant, str) and claimant:
+            self.default_claimant = claimant
+        self.claimant_primary = bool(data.get("claimant_primary"))
+        claimed = data.get("claimed") or []
+        if isinstance(claimed, list):
+            self.sid_claimed = {str(v) for v in claimed if v}
+        self.seq = max(self.sid_index.values(), default=0)
+        LOG.info(
+            "恢复状态：归属 %d 条，编号 %d 条，认领者 %s",
+            len(self.sid_owner),
+            len(self.sid_index),
+            self.default_claimant[:8] or "-",
+        )
+
+    def _save_state(self) -> None:
+        """整份写回。会话数量在几十的量级，直接覆盖比增量维护省事。"""
+        tmp = f"{self.state_file}.tmp"
+        try:
+            os.makedirs(os.path.dirname(self.state_file) or ".", exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "owners": self.sid_owner,
+                        "index": self.sid_index,
+                        "claimant": self.default_claimant,
+                        "claimant_primary": self.claimant_primary,
+                        "claimed": sorted(self.sid_claimed),
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
+            os.replace(tmp, self.state_file)
+        except Exception as exc:
+            LOG.warning("状态保存失败：%s", exc)
+
+    def _promote_claimant(self, client_id: str) -> None:
+        """把「无主会话」的主人换成主窗口，并把它之前认领来的归属一起搬过去。
+
+        只搬自己认领来的（sid_claimed），真正由别人创建的会话不动 ——
+        否则你在副本窗口里新建的终端会莫名其妙变成主窗口的。
+        """
+        old = self.default_claimant
+        if old == client_id:
+            self._save_state()
+            return
+        self.default_claimant = client_id
+        moved = 0
+        for sid in list(self.sid_claimed):
+            if self.sid_owner.get(sid) == old:
+                self.sid_owner[sid] = client_id
+                moved += 1
+        self._save_state()
+        LOG.info("主窗口认领：%s -> %s，迁移 %d 个会话", old[:8] or "-", client_id[:8], moved)
+
     # ---------------------------------------------------------------- 信令
 
     async def broadcast_ctls(self, payload: Dict[str, Any]) -> None:
@@ -228,15 +322,27 @@ class Relay:
     def decorate_sessions(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """广播前给每一行补上 owner：客户端靠它分清哪个终端是自己开的。
 
-        没有 owner 的（relay 重启前建的、或老版本客户端开的）留空，
-        客户端会退回自己本地记的那份。
+        没有 owner 的会话（归属机制上线前建的、或 relay 重启把表弄丢的）在这里
+        一次性认给默认认领者并落盘。不这么做的话，两端都说"不是我的"，
+        同一个终端会同时挂两个「共享」标 —— 标签就失去了唯一性。
         """
         rows = []
+        claimed = False
         for item in payload.get("sessions") or []:
             if isinstance(item, dict):
-                rows.append({**item, "owner": self.sid_owner.get(str(item.get("session_id") or ""), "")})
+                sid = str(item.get("session_id") or "")
+                owner = self.sid_owner.get(sid, "")
+                if not owner and sid and self.default_claimant:
+                    owner = self.default_claimant
+                    self.sid_owner[sid] = owner
+                    self.sid_claimed.add(sid)
+                    claimed = True
+                    LOG.info("无主会话认领 sid=%s -> %s", sid[:8], owner[:8])
+                rows.append({**item, "owner": owner})
             else:
                 rows.append(item)
+        if claimed:
+            self._save_state()
         return {**payload, "sessions": rows}
 
     async def broadcast_nodes(self) -> None:
@@ -296,6 +402,7 @@ class Relay:
                         self.sid_node[sid] = node_id
                         self.token_node[token] = node_id
                 elif kind == "SESSION_LIST":
+                    dirty = False
                     for item in msg.get("sessions") or []:
                         if isinstance(item, dict):
                             sid = str(item.get("session_id") or "")
@@ -318,8 +425,12 @@ class Relay:
                                     else:
                                         known = self.next_index()
                                     self.sid_index[sid] = known
+                                    dirty = True
                                 LOG.debug("列表定号 sid=%s index=%s", sid[:8], known)
                                 item["index"] = known
+                    # 新定下来的编号要落盘，否则 relay 重启后又从 1 数起。
+                    if dirty:
+                        self._save_state()
                     node.last_list = {
                         **msg,
                         "node": node_id,
@@ -346,6 +457,18 @@ class Relay:
         query = parse_qs(urlparse(ws.path).query)
         client_id = ((query.get("client") or [""])[0] or "").strip()
         self.ctl_client[ws] = client_id
+        # 谁是「无主会话」的主人：优先主窗口（默认数据目录，primary=1）。
+        # 副本窗口即使先连上，也只是临时拿着，主窗口一连上就整体移交，
+        # 这样不会因为启动顺序不同而让同一台终端换主人。
+        primary = ((query.get("primary") or [""])[0] or "") == "1"
+        if client_id:
+            if primary and (not self.default_claimant or not self.claimant_primary):
+                self.claimant_primary = True
+                self._promote_claimant(client_id)
+            elif not self.default_claimant:
+                self.default_claimant = client_id
+                self._save_state()
+                LOG.info("默认认领者设为 %s（副本窗口）", client_id[:8])
         LOG.info("ctl 上线 %s（当前 %d 个，client=%s）", ws.remote_address, len(self.ctls), client_id[:8] or "-")
 
         await self.send_json(
@@ -428,6 +551,8 @@ class Relay:
                         if token:
                             self.channels.setdefault(token, Channel()).node = node.node_id
                         self.stats["sessions_opened"] += 1
+                        # 新建的会话带上了归属与编号，立刻落盘。
+                        self._save_state()
                     else:
                         sid = str(msg.get("session_id") or "")
                         token = self.sid_token.get(sid)

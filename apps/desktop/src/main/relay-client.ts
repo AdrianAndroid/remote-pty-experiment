@@ -212,7 +212,11 @@ export class RelayClient {
   private wsUrl(path: string): string {
     const base = (this.config?.url ?? '').replace(/\/+$/, '')
     const sep = path.includes('?') ? '&' : '?'
-    const who = path.startsWith('/ctl') ? `&client=${encodeURIComponent(this.clientId)}` : ''
+    // primary=1：这个客户端用的是默认数据目录，是自己这台机器上的"主窗口"。
+    // relay 用它来决定无主会话归谁 —— 主窗口无标，副本窗口标共享，两边不会都标。
+    const who = path.startsWith('/ctl')
+      ? `&client=${encodeURIComponent(this.clientId)}${process.env.RPTY_USERDATA ? '' : '&primary=1'}`
+      : ''
     return `${base}${path}${sep}token=${encodeURIComponent(this.config?.token ?? '')}${who}`
   }
 

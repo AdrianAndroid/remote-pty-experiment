@@ -13,6 +13,10 @@ services:
       RPty_HOST: 127.0.0.1
       RPty_PORT: "8765"
       RPty_LOG_LEVEL: INFO
+      RPty_STATE_FILE: /data/relay-state.json
+    # 归属与编号要跨容器重建活下来：不然每重建一次，所有终端就换一次主人。
+    volumes:
+      - ./data:/data
     logging:
       driver: json-file
       options:
