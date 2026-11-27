@@ -36,6 +36,8 @@ export default function App(): React.JSX.Element {
   const [error, setError] = useState('')
   /** 手动断开过：连接页要显示「已断开 + 重新连接」，而不是首次配置的样子 */
   const [detached, setDetached] = useState(false)
+  /** 是对方断开把我这边的链路也带走的（不是我自己点的） */
+  const [peerClosed, setPeerClosed] = useState(false)
   /** 多台机器在线时，新建终端要先问一句开在哪台 */
   const [picker, setPicker] = useState<NodeInfo[] | null>(null)
 
@@ -146,6 +148,16 @@ export default function App(): React.JSX.Element {
 
     const offReadOnly = window.rpty.onReadOnly((value) => setReadOnly(value))
 
+    // 另一端主动断开：这条链路算一组，本端跟着断，且不自动重连。
+    const offPeerClosed = window.rpty.onPeerClosed(() => {
+      setSessions([])
+      setActiveId(null)
+      setStatus({ phase: 'idle', agentOnline: false })
+      autoCreatedRef.current = false
+      setPeerClosed(true)
+      setDetached(true)
+    })
+
     return () => {
       offStatus()
       offState()
@@ -156,6 +168,7 @@ export default function App(): React.JSX.Element {
       offResized()
       offError()
       offReadOnly()
+      offPeerClosed()
     }
   }, [])
 
@@ -170,6 +183,7 @@ export default function App(): React.JSX.Element {
       if (next.phase === 'error') setError(next.message ?? '连接失败')
       else {
         setDetached(false)
+        setPeerClosed(false)
         void window.rpty.getConfigInfo().then(setConfig)
       }
     } catch (err) {
@@ -195,6 +209,7 @@ export default function App(): React.JSX.Element {
       setActiveId(null)
       setStatus({ phase: 'idle', agentOnline: false })
       autoCreatedRef.current = false
+      setPeerClosed(false)
       setDetached(true)
     }
   }, [])
@@ -207,7 +222,10 @@ export default function App(): React.JSX.Element {
       const next = await window.rpty.reconnect()
       setStatus(next)
       if (next.phase === 'error') setError(next.message ?? '重连失败')
-      else setDetached(false)
+      else {
+        setDetached(false)
+        setPeerClosed(false)
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -380,6 +398,7 @@ export default function App(): React.JSX.Element {
         busy={busy}
         error={error}
         detached={detached}
+        reason={peerClosed ? 'peer' : 'self'}
         onConnect={(url, token) => void handleConnect(url, token)}
         onReconnect={() => void handleReconnect()}
       />

@@ -178,19 +178,29 @@ agent SHALL 在未设置 `AUTHORIZED=1` 时拒绝启动。
 - **WHEN** 客户端的行列和 PTY 不一致
 - **THEN** 全屏 TUI（如 claude、vim）仍然逐行对齐，不出现文字重叠或内容串行
 
-### Requirement: 连接可主动断开并可恢复
+### Requirement: 连接可主动断开并可恢复（配对断开）
 
 控制端 SHALL 提供断开与 relay 的连接的入口，且断开后 SHALL 能重建连接而不必重新输入地址与 token。
 
-断开 SHALL NOT 影响被控端上的 PTY 进程，也 SHALL NOT 影响其它控制端。
+一条链路上的控制端 SHALL 视为一组：任一端主动断开，其它端 SHALL 一起断开，且都 SHALL NOT 自动重连。
+
+断开 SHALL NOT 影响被控端上的 PTY 进程。
 
 #### Scenario: 侧栏断开
 - **WHEN** 用户点击侧栏底部的「断开连接」（或按 ⌘⇧D）
-- **THEN** 客户端关闭 ctl 与全部数据通道，不自动重连，界面回到连接页并显示「已断开」
+- **THEN** 客户端向 relay 发送主动离开，关闭 ctl 与全部数据通道，不自动重连，界面回到连接页并显示「已断开」
+
+#### Scenario: 一端断开带走其它端
+- **WHEN** 任一端主动断开
+- **THEN** 其它控制端收到 `PAIR_CLOSED`，立即断开并回到连接页，提示「另一端已断开连接」，且不自动重连
+
+#### Scenario: 掉线不等于主动断开
+- **WHEN** 客户端的网络异常中断（没有发出主动离开）
+- **THEN** relay 不做配对断开，其它控制端继续正常镜像
 
 #### Scenario: 断开不影响 PTY
 - **WHEN** 断开连接
-- **THEN** 宿主机上的 shell 进程 pid 不变、输出继续产生，其它控制端画面不受影响
+- **THEN** 宿主机上的 shell 进程 pid 不变、输出继续产生，重连后画面原样接上
 
 #### Scenario: 重新连接
 - **WHEN** 用户在「已断开」页面点击「重新连接」

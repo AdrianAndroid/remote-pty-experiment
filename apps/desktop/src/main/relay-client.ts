@@ -60,6 +60,8 @@ export interface RelayHandlers {
   onResized(leafId: string, cols: number, rows: number): void
   /** 整个节点的终端都没了（宿主退出 / 离线超时）：标签要真删掉，不是变灰。 */
   onRemoved(leafId: string): void
+  /** 配对端主动断开了链路：本端跟着断，且不要自动重连。 */
+  onPeerClosed(by?: string): void
 }
 
 const CONNECT_TIMEOUT = 12_000
@@ -194,7 +196,41 @@ export class RelayClient {
    * 否则重连时旧 leafId、旧字节缓冲、旧节点定时器会和 relay 新推的列表打架。
    */
   async disconnect(): Promise<void> {
+    // 先跟 relay 说一声「我主动走的」：它会让配对的另一端也断开。
+    // 网络异常掉线不走这条消息，所以不会误伤别人。
+    this.notifyLeave()
+    await new Promise((resolve) => setTimeout(resolve, 80))
     this.manualClose = true
+    this.resetLocalState()
+    this.closeCtl()
+    this.setStatus('idle')
+  }
+
+  /** 告诉 relay 我是主动断开，不是断网。 */
+  private notifyLeave(): void {
+    const ws = this.ctl
+    if (!ws || ws.readyState !== 1) return
+    try {
+      ws.send(JSON.stringify({ type: 'CTL_LEAVE', by: this.clientId }))
+    } catch {
+      // ctl 已经没了，无所谓
+    }
+  }
+
+  /**
+   * 配对端主动断开：本端跟着断，而且**不能自动重连** —— 否则刚断就自己连回去，
+   * 另一端再断，来回拉锯。要由用户点「重新连接」才回来。
+   */
+  private handlePeerClosed(by?: string): void {
+    this.manualClose = true
+    this.resetLocalState()
+    this.closeCtl()
+    this.setStatus('idle', by ? '另一端已断开连接' : '另一端已断开连接')
+    this.handlers.onPeerClosed(by)
+  }
+
+  /** 清掉本地与这次链路相关的全部状态，PTY 一个都不碰。 */
+  private resetLocalState(): void {
     this.clearReconnect()
     this.clearResync()
     for (const timer of this.nodeGoneTimers.values()) clearTimeout(timer)
@@ -213,8 +249,6 @@ export class RelayClient {
     this.hostname = ''
     this.nodes = []
     this.agentOnline = false
-    this.closeCtl()
-    this.setStatus('idle')
   }
 
   /** 断开之后回来：用上次保存的地址与 token 重连，用户不用重新输。 */
@@ -455,6 +489,11 @@ export class RelayClient {
         this.dropSession(session)
         break
       }
+
+      case 'PAIR_CLOSED':
+        // 另一端点了「断开连接」：这条链路的两头算一组，一起断。
+        this.handlePeerClosed(msg.by ? String(msg.by) : undefined)
+        break
 
       case 'ERROR':
         this.handlers.onError(String(msg.code ?? 'unknown'), String(msg.message ?? ''))

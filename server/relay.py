@@ -563,6 +563,28 @@ class Relay:
                     continue
 
                 msg_type = msg.get("type")
+
+                if msg_type == "CTL_LEAVE":
+                    # 一个控制端主动点了「断开连接」：这条链路算一组，通知其它端一起断。
+                    # 只在显式消息里做 —— 网络掉线不走这里，不会把别人的会话误伤掉。
+                    payload = {
+                        "type": "PAIR_CLOSED",
+                        "by": str(msg.get("by") or ""),
+                        "at": int(time.time()),
+                    }
+                    peers = 0
+                    for peer in list(self.ctls):
+                        if peer is ws:
+                            continue
+                        await self.send_json(peer, payload)
+                        peers += 1
+                    LOG.info(
+                        "ctl 主动断开（client=%s），已通知 %d 个其它控制端",
+                        str(msg.get("by") or "-")[:8],
+                        peers,
+                    )
+                    continue
+
                 if msg_type in ("SESSION_CREATE", "SESSION_CLOSE", "SESSION_RESIZE", "PING"):
                     if msg_type == "PING":
                         await self.send_json(ws, {"type": "PONG", "at": int(time.time())})

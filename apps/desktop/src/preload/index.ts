@@ -52,6 +52,7 @@ const bridge: RptyBridge = {
   onOwned: subscribe(IpcChannel.SessionOwned),
   onRemoved: subscribe(IpcChannel.SessionRemoved),
   onResized: subscribe(IpcChannel.SessionResized),
+  onPeerClosed: subscribe(IpcChannel.RelayPeerClosed),
   onStatus: subscribe<RelayStatus>(IpcChannel.RelayStatusChanged),
   onError: subscribe(IpcChannel.RelayError),
   onMenu: (handler: (command: MenuCommand, arg?: number) => void) => {

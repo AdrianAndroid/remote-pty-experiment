@@ -49,6 +49,8 @@ export const IpcChannel = {
   SessionStateChanged: 'session:state',
   SessionExit: 'session:exit',
   RelayStatusChanged: 'relay:status-changed',
+  /** 主 -> 渲染：配对的另一端主动断开了链路 */
+  RelayPeerClosed: 'relay:peer-closed',
   RelayError: 'relay:error',
   /** 主 -> 渲染：菜单命令 */
   MenuCommand: 'menu:command'
@@ -180,6 +182,8 @@ export interface RptyBridge {
   onRemoved(handler: (payload: { leafId: string }) => void): () => void
   onResized(handler: (payload: SessionResizedPayload) => void): () => void
   onStatus(handler: (payload: RelayStatus) => void): () => void
+  /** 另一端点了「断开连接」：本端跟着断，需要用户点「重新连接」才回来 */
+  onPeerClosed(handler: (payload: { by?: string }) => void): () => void
   onError(handler: (payload: RelayErrorPayload) => void): () => void
   onMenu(handler: (command: MenuCommand, arg?: number) => void): () => void
 }
