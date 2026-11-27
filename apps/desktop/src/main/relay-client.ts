@@ -35,6 +35,8 @@ interface RemoteSession {
   owned: boolean
   /** 这个 PTY 跑在哪个节点上 */
   node: string
+  /** 本端第一次看到这个会话的时间。列表还没回来时不急着判它死了。 */
+  createdAt: number
 }
 
 export interface RelayHandlers {
@@ -460,6 +462,12 @@ export class RelayClient {
           existing.owned = owned
           this.handlers.onOwned(existing.leafId, owned)
         }
+        // 列表里还有它，说明之前那次「消失」只是列表晚到，把假死拉回来。
+        if (existing.state === 'exited') {
+          existing.state = 'active'
+          this.handlers.onState(existing.leafId, 'active')
+          this.openData(existing)
+        }
         continue
       }
       this.adopt(
@@ -475,9 +483,24 @@ export class RelayClient {
 
     // 镜像的会话在远端没了（另一端关掉了），这边如实下线，别留着死标签骗人。
     // 多节点时必须只看本次上报的那个节点，否则 A 节点的列表会把 B 节点的会话全清掉。
+    const now = Date.now()
     for (const session of [...this.sessions.values()]) {
-      if (session.owned || seen.has(session.sessionId)) continue
+      if (seen.has(session.sessionId)) continue
       if (node && session.node !== node) continue
+
+      if (session.owned) {
+        // 自己开的终端从远端列表里消失：多半是另一个窗口、或者宿主那边把它关了。
+        // 标签留着（不擅自删用户的东西），但必须置灰并断掉数据通道 ——
+        // 之前这里直接 continue，结果另一端关完，这边还显示"活着"，点进去是死的。
+        if (now - session.createdAt < 3000) continue
+        if (session.state !== 'exited') {
+          session.state = 'exited'
+          this.handlers.onExit(session.leafId, 0)
+          this.closeData(session)
+        }
+        continue
+      }
+
       session.state = 'exited'
       this.handlers.onExit(session.leafId)
       this.closeData(session)
@@ -514,7 +537,8 @@ export class RelayClient {
       dataTimer: null,
       pending: [],
       owned: this.isMine(sessionId, ownerId),
-      node
+      node,
+      createdAt: Date.now()
     }
     this.sessions.set(leafId, session)
     this.bySessionId.set(sessionId, session)
@@ -566,7 +590,8 @@ export class RelayClient {
       dataTimer: null,
       pending: [],
       owned: true,
-      node: nodeId
+      node: nodeId,
+      createdAt: Date.now()
     }
     this.sessions.set(leafId, session)
     this.bySessionId.set(sessionId, session)
