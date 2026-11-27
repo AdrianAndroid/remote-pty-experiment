@@ -93,6 +93,8 @@ export class RelayClient {
   /** 节点离线后等多久算「宿主真的没了」。网络抖动不该把标签清掉。 */
   private static readonly NODE_GONE_MS = 30000
   private readonly nodeGoneTimers = new Map<string, NodeJS.Timeout>()
+  /** 本端主动"撤掉画面"的镜像会话。PTY 还在宿主上，只是这边不想看了。 */
+  private readonly detached = new Set<string>()
   private manualClose = false
   /**
    * 这个客户端自己的身份证。存储在 userData 里，重启不变 ——
@@ -323,6 +325,8 @@ export class RelayClient {
   private handleSignal(msg: Record<string, unknown>): void {
     switch (msg.type) {
       case 'HELLO':
+        // 重新连上 = 重新和宿主对表：之前手动撤掉的镜像会话，只要 PTY 还在就再挂回来。
+        this.detached.clear()
         if (msg.nodes) this.updateNodes(msg.nodes)
         else this.setAgentOnline(Boolean(msg.agent_online))
         this.setStatus('online')
@@ -386,15 +390,11 @@ export class RelayClient {
       }
 
       case 'SESSION_CLOSED': {
-        // 另一端点了 ×：会话确实没了，但不删本端标签 —— 留个灰的比默默消失更清楚。
+        // 创建端点了 ×：宿主上那块 PTY 已经没了，标签跟着消失。
         const sid = String(msg.session_id ?? '')
         const session = this.bySessionId.get(sid)
         if (!session) break
-        if (session.state !== 'exited') {
-          session.state = 'exited'
-          this.handlers.onExit(session.leafId, 0)
-          this.closeData(session)
-        }
+        this.dropSession(session)
         break
       }
 
@@ -406,12 +406,12 @@ export class RelayClient {
       }
 
       case 'SESSION_EXIT': {
+        // shell 自己 exit 了：PTY 没了，标签也一起收走。
         const sid = String(msg.session_id ?? '')
         const session = this.bySessionId.get(sid)
         if (!session) break
-        session.state = 'exited'
         this.handlers.onExit(session.leafId, Number(msg.exit_code ?? 0))
-        this.closeData(session)
+        this.dropSession(session)
         break
       }
 
@@ -482,6 +482,8 @@ export class RelayClient {
       const token = String(entry.data_token ?? '')
       if (!sid || !token) continue
       seen.add(sid)
+      // 本端主动撤掉的镜像会话：PTY 还在，但这次别自动装回来。
+      if (this.detached.has(sid)) continue
       const ownerId = String(entry.owner ?? '')
       const existing = this.bySessionId.get(sid)
       if (existing) {
@@ -519,14 +521,9 @@ export class RelayClient {
       if (node && session.node !== node) continue
       // 刚建的会话可能还在等下一份列表，别急着判死。
       if (now - session.createdAt < 3000) continue
-      // 统一处理：列表里没有 = 这个终端没了（被人关掉 / PTY 退出）。
-      // 标签一律留着变灰 —— 「谁关的、什么时候没的」这个信息有价值，
-      // 真删除只发生在宿主消失（NODE_GONE / 离线超时）那条路上。
-      if (session.state !== 'exited') {
-        session.state = 'exited'
-        this.handlers.onExit(session.leafId, 0)
-        this.closeData(session)
-      }
+      // 列表里没有 = 宿主上这块 PTY 已经不存在了。标签只是它的视图，
+      // 没有 PTY 就没有理由继续留在列表里。
+      this.dropSession(session)
     }
   }
 
@@ -549,6 +546,19 @@ export class RelayClient {
     }
   }
 
+  /** 从本端彻底摘掉一个会话：PTY 已经不存在了，标签不该留。 */
+  private dropSession(session: RemoteSession): void {
+    this.closeData(session)
+    this.sessions.delete(session.leafId)
+    this.bySessionId.delete(session.sessionId)
+    this.readyLeaves.delete(session.leafId)
+    this.buffered.delete(session.leafId)
+    this.pendingReady.delete(session.leafId)
+    if (this.ownedIds.delete(session.sessionId)) saveOwned(this.ownedIds)
+    this.detached.delete(session.sessionId)
+    this.handlers.onRemoved(session.leafId)
+  }
+
   /**
    * 整台机器的终端都没了（宿主退出 / 离线超时）：标签批量摘掉。
    *
@@ -559,11 +569,7 @@ export class RelayClient {
     let removed = 0
     for (const session of [...this.sessions.values()]) {
       if (node && session.node !== node) continue
-      this.closeData(session)
-      this.sessions.delete(session.leafId)
-      this.bySessionId.delete(session.sessionId)
-      if (this.ownedIds.delete(session.sessionId)) saveOwned(this.ownedIds)
-      this.handlers.onRemoved(session.leafId)
+      this.dropSession(session)
       removed += 1
     }
     if (removed > 0) {
@@ -717,6 +723,21 @@ export class RelayClient {
   close(leafId: string): void {
     const session = this.sessions.get(leafId)
     if (!session) return
+
+    if (!session.owned) {
+      // 镜像端点 ×：只撤掉自己这块画面，不杀宿主的 PTY。
+      // 记进 detached，免得下一份列表又把它装回来；重连时会清空，
+      // 那时宿主还在的话它就该重新出现、重新镜像。
+      this.detached.add(session.sessionId)
+      this.closeData(session)
+      this.sessions.delete(leafId)
+      this.bySessionId.delete(session.sessionId)
+      this.readyLeaves.delete(leafId)
+      this.buffered.delete(leafId)
+      this.pendingReady.delete(leafId)
+      return
+    }
+
     this.sendSignal({ type: 'SESSION_CLOSE', session_id: session.sessionId })
     this.closeData(session)
     this.sessions.delete(leafId)
