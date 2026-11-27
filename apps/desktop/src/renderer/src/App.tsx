@@ -85,6 +85,8 @@ export default function App(): React.JSX.Element {
   const [detached, setDetached] = useState(false)
   /** 是对方断开把我这边的链路也带走的（不是我自己点的） */
   const [peerClosed, setPeerClosed] = useState(false)
+  /** 断开的那一端叫什么（relay 认识它的话） */
+  const [peerName, setPeerName] = useState('')
   /** 当前进入的设备；null = 停在设备列表，不为任何会话开数据通道 */
   const [activeNode, setActiveNode] = useState<string | null>(null)
   /** 多台机器在线时，新建终端要先问一句开在哪台 */
@@ -269,7 +271,8 @@ export default function App(): React.JSX.Element {
     const offReadOnly = window.rpty.onReadOnly((value) => setReadOnly(value))
 
     // 另一端主动断开：这条链路算一组，本端跟着断，且不自动重连。
-    const offPeerClosed = window.rpty.onPeerClosed(() => {
+    const offPeerClosed = window.rpty.onPeerClosed((payload) => {
+      setPeerName(payload?.name ?? '')
       setSessions([])
       setActiveId(null)
       setStatus({ phase: 'idle', agentOnline: false })
@@ -576,6 +579,7 @@ export default function App(): React.JSX.Element {
         onPick={(node) => void enterDevice(node)}
         onExitRelay={() => void handleDisconnect()}
         onReload={() => void window.rpty.getStatus().then(setStatus)}
+        clientName={status.clientName}
       />
     )
   }
@@ -594,6 +598,7 @@ export default function App(): React.JSX.Element {
         error={error}
         detached={detached}
         reason={peerClosed ? 'peer' : 'self'}
+        peerName={peerName}
         onConnect={(url, token) => void handleConnect(url, token)}
         onReconnect={() => void handleReconnect()}
       />

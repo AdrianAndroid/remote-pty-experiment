@@ -16,6 +16,8 @@ interface DevicesScreenProps {
   onPick: (node: string) => void
   onExitRelay: () => void
   onReload: () => void
+  /** 我这个客户端的名字（不卸载重装就不变） */
+  clientName?: string
 }
 
 function pretty(name: string): string {
@@ -29,7 +31,8 @@ export function DevicesScreen({
   error,
   onPick,
   onExitRelay,
-  onReload
+  onReload,
+  clientName = ''
 }: DevicesScreenProps): React.JSX.Element {
   const sorted = [...nodes].sort((a, b) => Number(b.online) - Number(a.online))
   // 同一台机器跑多个 agent 时显示名会一样，靠 id 尾段区分；名字唯一时不显示，保持干净
@@ -47,6 +50,7 @@ export function DevicesScreen({
             <strong>rpty</strong>
             <span className={online ? 'devices__state devices__state--on' : 'devices__state'}>
               {online ? '已连接中继' : '中继断开，正在重连…'}
+              {clientName && <span className="devices__me">我 · {clientName}</span>}
             </span>
           </div>
         </div>

@@ -17,6 +17,8 @@ interface ConnectScreenProps {
   detached?: boolean
   /** self = 自己点的；peer = 另一端点了，把这条链路一起带走 */
   reason?: 'self' | 'peer'
+  /** 断开的是谁（relay 认识的客户端名） */
+  peerName?: string
   onConnect: (url: string, token: string) => void
   onReconnect?: () => void
 }
@@ -28,6 +30,7 @@ export function ConnectScreen({
   error,
   detached = false,
   reason = 'self',
+  peerName = '',
   onConnect,
   onReconnect
 }: ConnectScreenProps): React.JSX.Element {
@@ -51,11 +54,17 @@ export function ConnectScreen({
         <div className="connect__card">
           <div className="connect__logo">▚ rpty</div>
           <p className="connect__standby">
-            {reason === 'peer' ? '另一端已断开连接' : '已断开与 relay 的连接'}
+            {reason === 'peer'
+              ? peerName
+                ? `「${peerName}」已断开连接`
+                : '另一端已断开连接'
+              : '已断开与 relay 的连接'}
           </p>
           <p className="connect__hint">
             {reason === 'peer'
-              ? '另一台客户端点了「断开连接」，这条链路的两端一起断。宿主机上的终端还在跑，重连后原样回来。'
+              ? `${
+                  peerName ? `客户端「${peerName}」` : '另一台客户端'
+                }点了「断开连接」，这条链路的两端一起断。宿主机上的终端还在跑，重连后原样回来。`
               : '宿主机上的终端还在跑，重连后会原样回来 —— 断开只是这台机器不再收画面。'}
           </p>
 

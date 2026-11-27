@@ -102,6 +102,8 @@ export interface RelayStatus {
   hostname?: string
   /** 当前在线的所有节点（多机场景） */
   nodes?: NodeInfo[]
+  /** 这个客户端自己的名字：首次运行生成，不删数据目录就不变 */
+  clientName?: string
   message?: string
 }
 
@@ -196,7 +198,7 @@ export interface RptyBridge {
   onResized(handler: (payload: SessionResizedPayload) => void): () => void
   onStatus(handler: (payload: RelayStatus) => void): () => void
   /** 另一端点了「断开连接」：本端跟着断，需要用户点「重新连接」才回来 */
-  onPeerClosed(handler: (payload: { by?: string }) => void): () => void
+  onPeerClosed(handler: (payload: { by?: string; name?: string }) => void): () => void
   onError(handler: (payload: RelayErrorPayload) => void): () => void
   onMenu(handler: (command: MenuCommand, arg?: number) => void): () => void
 }

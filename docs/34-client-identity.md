@@ -1,0 +1,46 @@
+# 34 · 客户端自己起名字，重装才换
+
+## 问题
+
+设备和标签都稳住了，客户端还只是个 uuid：
+
+- 配对断开时另一端只知道"另一端断开了"，两台以上在线时不知道是谁断的；
+- 设备列表页说不出"我是谁"，同时开几个窗口排查只能靠猜。
+
+## 规则
+
+首次运行生成 `<主机名短名>-<4 位 hex>`，写进 `<userData>/client-name`，之后每次读回同一个：
+
+```
+~/Library/Application Support/rpty-desktop/client-name        → zhaojiandeMac-mini-1620
+~/Library/Application Support/rpty-desktop-b/client-name      → zhaojiandeMac-mini-f366
+```
+
+**不删数据目录就不变**：重启、断网重连、重新配对都不变；换个 userData（同机多开）各是各的名字；删目录 = 换新客户端，等同重装。
+
+名字只给人看，**归属判定仍然用 `client-id`（uuid）**：改名不会让标签变成「共享」。
+
+## 数据怎么走
+
+| 环节 | 变化 |
+| --- | --- |
+| ctl 握手 | `wss://…/ctl?token=…&client=<uuid>&name=<name>&primary=1` |
+| relay | 记住 `ctl_name[ws]`，`PAIR_CLOSED` 带 `by_name`，`/healthz` 输出 `clients: [{client, name}]` |
+| 客户端状态 | `RelayStatus.clientName`，增量事件也带（否则重连后名字消失） |
+| 界面 | 设备列表「已连接中继 · 我 · <name>」；断开页「「<name>」已断开连接」 |
+
+老 relay 不认 `name` 时握手参数被忽略，界面退回"另一端已断开连接"，连接本身不受影响。
+
+## 实测（mini 上两个客户端 + 服务器 relay）
+
+| 步骤 | 结果 |
+| --- | --- |
+| 首次启动 A | 生成 `zhaojiandeMac-mini-1620`，`/healthz` 的 `clients` 里带上 |
+| 首次启动 B（另一个 userData） | 生成 `zhaojiandeMac-mini-f366`，两个 ctl 都在线且名字不同 |
+| 杀掉 A 重启 | 仍是 `1620`（B 同样不变） |
+| 两端都进同一设备，B 点「退出中继」 | A 断开页显示「「zhaojiandeMac-mini-f366」已断开连接」，副文案点名 B |
+| 重连后顶栏 | 「已连接中继 · 我 · zhaojiandeMac-mini-1620」不再丢 |
+
+## 顺带修掉的坑
+
+`setStatus()` 的增量状态事件原来没带 `clientName`，导致点「重新连接」之后顶栏的「我 · xxx」消失 —— 已补上。

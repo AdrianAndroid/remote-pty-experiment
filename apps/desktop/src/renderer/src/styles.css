@@ -1048,3 +1048,13 @@ code {
   font-family: 'SF Mono', Menlo, monospace;
   letter-spacing: 0;
 }
+
+/* 设备列表顶栏里的「我 · 客户端名」 */
+.devices__me {
+  margin-left: 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--line);
+  color: var(--text-faint);
+  font-family: 'SF Mono', Menlo, monospace;
+  font-size: 10.5px;
+}

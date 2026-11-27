@@ -127,6 +127,9 @@ class Relay:
         self.token_node: Dict[str, str] = {}
         # ctl 连接 -> 客户端自报的稳定 id，用来判断「这个会话是谁开的」
         self.ctl_client: Dict[Any, str] = {}
+        # 控制端自我名：客户端首次运行生成，不卸载重装就不变。
+        # 用来在「配对断开」时告诉另一端是谁断的，也方便 healthz 排查。
+        self.ctl_name: Dict[Any, str] = {}
         # session_id -> 开它的客户端 id。重启 relay 会丢，客户端本地还存了一份。
         self.sid_owner: Dict[str, str] = {}
         # session_id -> relay 分配的编号。宿主进程可能还在自增自己的旧计数，
@@ -186,6 +189,10 @@ class Relay:
                     "ctl": len(self.ctls) > 0,
                     "ctls": len(self.ctls),
                     "nodes": nodes,
+                    "clients": [
+                        {"client": cid, "name": self.ctl_name.get(ws, "")}
+                        for ws, cid in self.ctl_client.items()
+                    ],
                     "channels": len(self.channels),
                     "viewers": sum(len(c.viewers) for c in self.channels.values()),
                     **self.stats,
@@ -517,7 +524,9 @@ class Relay:
         self.ctls.add(ws)
         query = parse_qs(urlparse(ws.path).query)
         client_id = ((query.get("client") or [""])[0] or "").strip()
+        client_name = ((query.get("name") or [""])[0] or "").strip()
         self.ctl_client[ws] = client_id
+        self.ctl_name[ws] = client_name
         # 谁是「无主会话」的主人：优先主窗口（默认数据目录，primary=1）。
         # 副本窗口即使先连上，也只是临时拿着，主窗口一连上就整体移交，
         # 这样不会因为启动顺序不同而让同一台终端换主人。
@@ -570,6 +579,7 @@ class Relay:
                     payload = {
                         "type": "PAIR_CLOSED",
                         "by": str(msg.get("by") or ""),
+                        "by_name": self.ctl_name.get(ws, ""),
                         "at": int(time.time()),
                     }
                     peers = 0
@@ -702,6 +712,7 @@ class Relay:
         finally:
             self.ctls.discard(ws)
             self.ctl_client.pop(ws, None)
+            self.ctl_name.pop(ws, None)
             LOG.info("ctl 下线 %s（剩 %d 个）", ws.remote_address, len(self.ctls))
             if not self.ctls:
                 for node in self.nodes.values():

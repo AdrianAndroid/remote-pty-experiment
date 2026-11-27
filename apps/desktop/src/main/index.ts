@@ -34,7 +34,7 @@ const relay = new RelayClient({
   onOwned: (leafId, owned) => send(IpcChannel.SessionOwned, { leafId, owned }),
   onRemoved: (leafId) => send(IpcChannel.SessionRemoved, { leafId }),
   onResized: (leafId, cols, rows) => send(IpcChannel.SessionResized, { leafId, cols, rows }),
-  onPeerClosed: (by) => send(IpcChannel.RelayPeerClosed, { by })
+  onPeerClosed: (by, name) => send(IpcChannel.RelayPeerClosed, { by, name })
 })
 
 function send(channel: string, payload: unknown): void {

@@ -264,3 +264,25 @@ agent SHALL 在启动时解决自己的节点身份并落盘，使**重启、重
 #### Scenario: 显示名重复时客户端可区分
 - **WHEN** 多台设备的显示名相同
 - **THEN** 设备卡片补上 id 的 `-<hex4>` 尾段以便区分
+
+### Requirement: 客户端身份的持久化
+
+每个客户端 SHALL 在首次运行时生成 `<主机名短名>-<4 位 hex>` 并写入 `<userData>/client-name`，
+此后每次启动读回同一个名字 —— **不删除数据目录就不变**。
+
+名字随 ctl 握手传给 relay（`name` 参数），relay 在配对断开广播里带上 `by_name`，
+并在 `/healthz` 的 `clients` 里列出，供对端提示与排查使用。
+
+客户端身份（`client-id`）与客户端名字（`client-name`）分工：前者判定会话归属，后者给人看。
+
+#### Scenario: 名字跨重启稳定
+- **WHEN** 客户端重启
+- **THEN** 读回同一个 `client-name`，界面「我 · <name>」不变
+
+#### Scenario: 同机两个客户端不同名
+- **WHEN** 用不同 userData 启动两个客户端
+- **THEN** 各有一份 `client-name`，`/healthz` 的 `clients` 能分别看到
+
+#### Scenario: 配对断开点名
+- **WHEN** 一端点「退出中继」
+- **THEN** 另一端断开页显示「「<by_name>」已断开连接」；relay 不认识名字时退回「另一端已断开连接」

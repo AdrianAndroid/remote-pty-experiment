@@ -61,7 +61,7 @@ export interface RelayHandlers {
   /** 整个节点的终端都没了（宿主退出 / 离线超时）：标签要真删掉，不是变灰。 */
   onRemoved(leafId: string): void
   /** 配对端主动断开了链路：本端跟着断，且不要自动重连。 */
-  onPeerClosed(by?: string): void
+  onPeerClosed(by?: string, byName?: string): void
 }
 
 const CONNECT_TIMEOUT = 12_000
@@ -114,6 +114,8 @@ export class RelayClient {
    * 不靠它，客户端一重启就忘了哪些终端是自己开的，Tab 会整片变成「共享」。
    */
   private readonly clientId = loadClientId()
+  /** 客户端自我名：首次运行生成，不删数据目录就不变（同机多开也各是各的） */
+  private readonly clientName = loadClientName()
   /** 自己开过的 sessionId。relay 重启会丢归属，这里留一份兜底。 */
   private readonly ownedIds = loadOwned()
 
@@ -126,7 +128,8 @@ export class RelayClient {
       phase: this.phase,
       agentOnline: this.agentOnline,
       hostname: this.hostname,
-      nodes: this.nodes
+      nodes: this.nodes,
+      clientName: this.clientName
     }
   }
 
@@ -137,6 +140,7 @@ export class RelayClient {
       agentOnline: this.agentOnline,
       hostname: this.hostname,
       nodes: this.nodes,
+      clientName: this.clientName,
       message
     })
   }
@@ -257,12 +261,13 @@ export class RelayClient {
    * 配对端主动断开：本端跟着断，而且**不能自动重连** —— 否则刚断就自己连回去，
    * 另一端再断，来回拉锯。要由用户点「重新连接」才回来。
    */
-  private handlePeerClosed(by?: string): void {
+  private handlePeerClosed(by?: string, byName?: string): void {
     this.manualClose = true
     this.resetLocalState()
     this.closeCtl()
-    this.setStatus('idle', by ? '另一端已断开连接' : '另一端已断开连接')
-    this.handlers.onPeerClosed(by)
+    // 有名字就说「谁」断的，没有就退回泛称
+    this.setStatus('idle', byName ? `${byName} 已断开连接` : '另一端已断开连接')
+    this.handlers.onPeerClosed(by, byName)
   }
 
   /** 清掉本地与这次链路相关的全部状态，PTY 一个都不碰。 */
@@ -322,7 +327,9 @@ export class RelayClient {
     // primary=1：这个客户端用的是默认数据目录，是自己这台机器上的"主窗口"。
     // relay 用它来决定无主会话归谁 —— 主窗口无标，副本窗口标共享，两边不会都标。
     const who = path.startsWith('/ctl')
-      ? `&client=${encodeURIComponent(this.clientId)}${process.env.RPTY_USERDATA ? '' : '&primary=1'}`
+      ? `&client=${encodeURIComponent(this.clientId)}&name=${encodeURIComponent(this.clientName)}${
+          process.env.RPTY_USERDATA ? '' : '&primary=1'
+        }`
       : ''
     return `${base}${path}${sep}token=${encodeURIComponent(this.config?.token ?? '')}${who}`
   }
@@ -530,7 +537,10 @@ export class RelayClient {
 
       case 'PAIR_CLOSED':
         // 另一端点了「断开连接」：这条链路的两头算一组，一起断。
-        this.handlePeerClosed(msg.by ? String(msg.by) : undefined)
+        this.handlePeerClosed(
+          msg.by ? String(msg.by) : undefined,
+          msg.by_name ? String(msg.by_name) : undefined
+        )
         break
 
       case 'ERROR':
@@ -1020,6 +1030,28 @@ export class RelayClient {
         // ignore
       }
     }
+  }
+}
+
+/**
+ * 客户端自己的名字：`<主机名短名>-<4 位 hex>`，生成一次写进 userData。
+ *
+ * 只要不卸载重装（不删数据目录），重启、换网、换 relay 都还是这个名字。
+ * 同机多开两个客户端（不同 RPTY_USERDATA）各自生成，天然不撞。
+ */
+function loadClientName(): string {
+  const file = join(app.getPath('userData'), 'client-name')
+  try {
+    if (existsSync(file)) {
+      const saved = readFileSync(file, 'utf8').trim()
+      if (saved) return saved
+    }
+    const short = os.hostname().split('.')[0] || 'client'
+    const created = `${short}-${randomUUID().replace(/-/g, '').slice(0, 4)}`
+    writeFileSync(file, created, 'utf8')
+    return created
+  } catch {
+    return `${os.hostname().split('.')[0] || 'client'}-${randomUUID().slice(0, 4)}`
   }
 }
 
