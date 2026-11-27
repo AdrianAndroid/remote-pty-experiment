@@ -91,7 +91,21 @@ export interface NodeInfo {
   online: boolean
   /** 这台机器上现有的会话数 */
   sessions: number
-  /** 是不是本机 —— 由客户端配置推算，relay 不知道 */
+}
+
+/** 在线客户端：用户看到的就是这个列表，断开 WSS 就从列表里消失。 */
+export interface ClientInfo {
+  /** 客户端 id：固定，不重装不变 */
+  client: string
+  /** 客户端名字：`<主机短名>-<4 位码>` */
+  name: string
+  /** 它认领的宿主 node id（本机 agent）；没认领就是空 */
+  host: string
+  /** 宿主显示名，认领不上时为空 */
+  host_name?: string
+  host_online?: boolean
+  /** 宿主上现有会话数 */
+  sessions?: number
 }
 
 export interface RelayStatus {
@@ -103,8 +117,10 @@ export interface RelayStatus {
   nodes?: NodeInfo[]
   /** 这个客户端自己的名字：首次运行生成，不删数据目录就不变 */
   clientName?: string
-  /** 本机主机名短名，用来在设备列表里认出“我这台机器”那条 */
-  selfHost?: string
+  /** 自己的客户端 id：用来在客户端列表里认出「我」 */
+  clientId?: string
+  /** relay 内存里的在线客户端列表 */
+  clients?: ClientInfo[]
   message?: string
 }
 

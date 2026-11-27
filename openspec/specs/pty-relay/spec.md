@@ -286,3 +286,45 @@ agent SHALL 在启动时解决自己的节点身份并落盘，使**重启、重
 #### Scenario: 配对断开点名
 - **WHEN** 一端点「退出中继」
 - **THEN** 另一端断开页显示「「<by_name>」已断开连接」；relay 不认识名字时退回「另一端已断开连接」
+
+### Requirement: 在线客户端列表
+
+屏幕上列出的本实体 SHALL 是**客户端**，不是设备/节点。relay 用内存中的 ctl 连接维护这份列表，
+客户端断开 wss 就立刻从列表里消失 —— 在线列表即"此刻连着中继的客户端"。
+
+一个 client id 开多个窗口时按 client id 合并成一行。自己那条标「我」、不可进入，并固定排第一。
+
+#### Scenario: 连上才在列表里
+- **WHEN** 客户端连上 wss
+- **THEN** 其它客户端的列表里出现它，并带上它认领的宿主名与会话数
+
+#### Scenario: 断开即消失
+- **WHEN** 客户端点「断开中继」或进程退出
+- **THEN** relay 立刻广播新列表，它从别人的列表里消失，不回退成"离线"灰卡
+
+#### Scenario: 自己不给自己发进入入口
+- **WHEN** 列表里有一条是自己的 client id
+- **THEN** 那一行显示「我」，无「进入」，点击无反应
+
+### Requirement: 宿主由本地 agent 认领
+
+客户端 SHALL NOT 用主机名推断宿主。agent 在 `~/.rpty/agents/<node>.sock` 开 unix socket 应答
+`{"op":"whoami"}`，并在同目录写 `<node>.json` 注册文件；客户端连中继前扫该目录问出宿主 node id，
+握手时用 `host=` 上报，relay 记入 `ctl_host` 并在 `CLIENTS` / `/healthz` 里带出 `host`、`host_name`、
+`host_online`、`sessions`。
+
+#### Scenario: agent 未运行时
+- **WHEN** 本机没有 agent 注册文件
+- **THEN** 客户端照常连中继，只是列表里 `host` 为空、显示「宿主未上线」，不进别人的可选列表
+
+#### Scenario: 同机多客户端
+- **WHEN** 同一台机器开两个客户端
+- **THEN** 两条 ctl 各自一行、各自名字，`host` 同为那台机器唯一的 node id
+
+### Requirement: 断开不连坐
+
+每个客户端是独立个体：`CTL_LEAVE` SHALL 只影响自己，不广播 `PAIR_CLOSED`，不改变别人的画面。
+
+#### Scenario: 他人断开
+- **WHEN** 另一个客户端断开中继
+- **THEN** 我正在看的终端不受影响，列表里只是少了它那一行

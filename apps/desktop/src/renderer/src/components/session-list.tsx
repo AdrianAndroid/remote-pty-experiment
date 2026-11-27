@@ -44,7 +44,7 @@ interface SessionListProps {
   onToggleReadOnly: () => void
   /** 断开整台客户端到 relay 的链路（宿主上的 PTY 不动，可以再连回来） */
   onDisconnect: () => void
-  /** 返回设备列表（只撤画面，宿主上的 PTY 不动） */
+  /** 返回在线客户端列表（只撤画面，对方宿主上的 PTY 不动） */
   onBack?: () => void
   backLabel?: string
 }
@@ -73,7 +73,7 @@ export function SessionList({
   onToggleReadOnly,
   onDisconnect,
   onBack,
-  backLabel = '设备'
+  backLabel = '客户端'
 }: SessionListProps): React.JSX.Element {
   const online = phase === 'online' && agentOnline
 
@@ -95,7 +95,7 @@ export function SessionList({
               <span className={online ? 'dot dot--on' : 'dot dot--off'}>
                 {online ? (
                   <>
-                    <span className="sidebar__role">设备</span>
+                    <span className="sidebar__role">客户端</span>
                     {(hostname || '已连接').replace(/\.local$/, '')}
                   </>
                 ) : phase === 'connecting' ? (
@@ -214,10 +214,10 @@ export function SessionList({
         type="button"
         className="modebtn modebtn--disconnect"
         onClick={onDisconnect}
-        title="退出中继（⌘⇧D）· 另一台配对的客户端会一起断；设备上的终端继续跑，随时可以再连回来"
+        title="断开中继（⌘⇧D）· 只断这条 WSS；对方宿主上的终端继续跑，随时可以再连回来"
       >
         <span className="modebtn__dot" />
-        {!collapsed && <span>退出中继</span>}
+        {!collapsed && <span>断开中继</span>}
         {!collapsed && <kbd>⌘⇧D</kbd>}
       </button>
 

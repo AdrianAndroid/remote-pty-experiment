@@ -2,8 +2,11 @@
  * 连接页：第一次用、连不上，或者手动断开之后停在这里。
  *
  * token 由主进程保存，不回传渲染层，所以这里留空表示「沿用已保存的」。
- * 手动断开过（detached）时走简化视图：一个「重新连接」按钮，地址与 token 都沿用，
+ * 手动断开过（detached）时走简化视图：一个「连接」按钮，地址与 token 都沿用，
  * 不想改配置的人不用再看一遍表单。
+ *
+ * 断开 WSS 就是断开，回到这里重新「连接」—— 不是"重连"：连接是一次新的握手，
+ * 跟刚才那条连接没有继承关系。
  */
 
 import { useEffect, useState } from 'react'
@@ -76,7 +79,7 @@ export function ConnectScreen({
             disabled={busy}
             onClick={() => onReconnect?.()}
           >
-            {busy ? '重新连接中…' : '重新连接'}
+            {busy ? '连接中…' : '连接'}
           </button>
 
           <button type="button" className="connect__link" onClick={() => setShowForm(true)}>
@@ -139,7 +142,7 @@ export function ConnectScreen({
           disabled={!canSubmit}
           onClick={() => onConnect(url.trim(), token.trim())}
         >
-          {busy ? '连接中…' : detached ? '重新连接' : '连接'}
+          {busy ? '连接中…' : '连接'}
         </button>
 
         {detached && (

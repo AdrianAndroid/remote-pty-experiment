@@ -17,7 +17,7 @@ import { SessionList, type SessionMeta } from './components/session-list'
 import { TerminalPane } from './components/terminal-pane'
 import { ConnectScreen } from './screens/connect'
 import { DevicesScreen } from './screens/devices'
-import { deviceLabel, prettyName } from './lib/device-label'
+import { deviceLabel } from './lib/device-label'
 
 const MAX_SESSIONS = 20
 
@@ -90,7 +90,17 @@ export default function App(): React.JSX.Element {
   const [peerName, setPeerName] = useState('')
   /** 当前进入的设备；null = 停在设备列表，不为任何会话开数据通道 */
   const [activeNode, setActiveNode] = useState<string | null>(null)
+  /** 我进的是哪个客户端（同机多客户端时，宿主 node 可能一样，名字要按客户端算） */
+  const [activeClientId, setActiveClientId] = useState<string | null>(null)
   /** 多台机器在线时，新建终端要先问一句开在哪台 */
+
+  /**
+   * 「我」= 我的客户端。列表按客户端展示，所以自己那条直接按 client id 认，
+   * 不再用主机名猜（主机名只在客户端内部"认领宿主"那一步用一次）。
+   */
+  const mySelf = (status.clients ?? []).find((item) => item.client === status.clientId)
+  /** 我认领的宿主：自己机器上跑 PTY 的那个 agent。只有它上面的标签才落盘 */
+  const ownHostNode = mySelf?.host ?? ''
 
   const statusRef = useRef(status)
   statusRef.current = status
@@ -99,6 +109,9 @@ export default function App(): React.JSX.Element {
   const autoCreatedRef = useRef(false)
   const readOnlyRef = useRef(false)
   const activeNodeRef = useRef<string | null>(null)
+  /** 我认领的宿主 node id：只有它的标签才落盘 */
+  const ownHostRef = useRef('')
+  ownHostRef.current = ownHostNode
   /** 进设备时要从存储里选回来的那个 sessionId（只生效一次） */
   const pendingActiveRef = useRef<string | null>(null)
   const activeIdRef = useRef<string | null>(null)
@@ -118,7 +131,8 @@ export default function App(): React.JSX.Element {
    */
   const persistTabs = useCallback(() => {
     const node = activeNodeRef.current
-    if (!node || sessionsRef.current.length === 0) return
+    // 只维护自己宿主上的标签：进别人的客户端看到的是对方的终端，不是"我的"，不落盘
+    if (!node || node !== ownHostRef.current || sessionsRef.current.length === 0) return
     const items = sessionsRef.current
       .filter((item) => item.sessionId)
       .map((item, index) => ({
@@ -141,7 +155,10 @@ export default function App(): React.JSX.Element {
     if (!Array.isArray(list) || list.length === 0) return
     autoCreatedRef.current = true
     // 上次这个设备留下的标题 / 顺序 / 选中，按 sessionId 对回去
-    const saved = readTabStore()[activeNodeRef.current ?? '']
+    const saved =
+      activeNodeRef.current && activeNodeRef.current === ownHostRef.current
+        ? readTabStore()[activeNodeRef.current]
+        : undefined
     const savedById = new Map((saved?.items ?? []).map((item) => [item.sessionId, item]))
     setSessions((prev) => {
       const known = new Set(prev.map((item) => item.id))
@@ -537,8 +554,9 @@ export default function App(): React.JSX.Element {
    * 顺序不能反 —— 反了的话 adopt 事件会先涌进来，刚铺好的标签又被清一次。
    */
   const enterDevice = useCallback(
-    async (node: string) => {
+    async (node: string, clientId: string) => {
       setError('')
+      setActiveClientId(clientId)
       setSessions([])
       setActiveId(null)
       autoCreatedRef.current = false
@@ -559,6 +577,7 @@ export default function App(): React.JSX.Element {
     activeNodeRef.current = null
     await window.rpty.activateNode(null)
     setActiveNode(null)
+    setActiveClientId(null)
     setSessions([])
     setActiveId(null)
     autoCreatedRef.current = false
@@ -569,33 +588,18 @@ export default function App(): React.JSX.Element {
 
   const online = status.phase === 'online'
 
-  /**
-   * 「我」是谁：直接取设备列表里属于本机的那条（agent 上报的 hostname 与本机同名），
-   * 显示名字跟卡片完全一致 —— 不再给客户端单独编一个跟设备对不上的码。
-   * 本机没跑 agent 时退回主机短名。
-   */
-  const selfHost = (status.selfHost ?? '').toLowerCase()
-  const myDevice = (status.nodes ?? [])
-    .filter((item) => selfHost && prettyName(item.name).toLowerCase() === selfHost)
-    .sort((a, b) => Number(b.online) - Number(a.online) || b.sessions - a.sessions)[0]
-  const selfLabel = myDevice ? deviceLabel(myDevice) : (status.selfHost ?? '')
-  /** 标「我」并禁止进入的那条：就是我所在的这台机器的 agent */
-  const selfNode = myDevice?.node ?? ''
-
   // 中继连着、但还没选机器：停在设备列表。这一屏不为任何会话开数据通道。
   if (!detached && online && !activeNode) {
     return (
       <DevicesScreen
-        nodes={status.nodes ?? []}
+        clients={status.clients ?? []}
+        selfClientId={status.clientId}
         online={online}
         busy={busy}
         error={error}
-        onPick={(node) => void enterDevice(node)}
+        onPick={(host, clientId) => void enterDevice(host, clientId)}
         onExitRelay={() => void handleDisconnect()}
         onReload={() => void window.rpty.getStatus().then(setStatus)}
-        clientName={status.clientName}
-        selfLabel={selfLabel}
-        selfNode={selfNode}
       />
     )
   }
@@ -603,7 +607,11 @@ export default function App(): React.JSX.Element {
   const showWorkspace = activeNode !== null && (online || sessions.length > 0)
   // 侧栏显示的是「现在这台设备」，不是本机名
   const activeDevice = (status.nodes ?? []).find((item) => item.node === activeNode)
-  const deviceName = activeDevice ? deviceLabel(activeDevice) : (activeNode ?? '')
+  // 工作区顶部写的是「我进的是哪个客户端」，不是主机名
+  const activeClient =
+    (status.clients ?? []).find((item) => item.client === activeClientId) ??
+    (status.clients ?? []).find((item) => item.host === activeNode && item.client !== status.clientId)
+  const deviceName = activeClient?.name ?? (activeDevice ? deviceLabel(activeDevice) : (activeNode ?? ''))
 
   if (detached || !showWorkspace) {
     return (
@@ -647,7 +655,7 @@ export default function App(): React.JSX.Element {
         onToggleReadOnly={() => void toggleReadOnly()}
         onDisconnect={() => void handleDisconnect()}
         onBack={() => void leaveDevice()}
-        backLabel="设备"
+        backLabel="客户端"
       />
 
       <main className="stage">

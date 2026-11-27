@@ -1,4 +1,77 @@
 /**
+ * 问本机的 agent「你是谁」，拿到它认领的 node id。
+ *
+ * 走 ~/.rpty/agents/ 下的注册文件找到 unix socket，连上去问一句 whoami。
+ * 本机没跑 agent（或 socket 不在）就返回空串 —— 这个客户端就"没有宿主"，
+ * 列表里会显示「宿主未上线」，而不是去猜哪台机器是自己。
+ */
+function askLocalAgent(): Promise<string> {
+  const dir = process.env.RPTY_REGISTRY || join(os.homedir(), '.rpty', 'agents')
+  return new Promise((resolve) => {
+    let entries: { file: string; startedAt: number }[] = []
+    try {
+      entries = readdirSync(dir)
+        .filter((name) => name.endsWith('.json'))
+        .map((file) => {
+          let startedAt = 0
+          try {
+            const raw = JSON.parse(readFileSync(join(dir, file), 'utf8')) as { started_at?: number }
+            startedAt = Number(raw.started_at ?? 0)
+          } catch {
+            // 坏文件就当没这个 agent
+          }
+          return { file, startedAt }
+        })
+        // 老的先问：同机多开时，先起来的那台就是这台机器的"正统"宿主
+        .sort((a, b) => a.startedAt - b.startedAt)
+    } catch {
+      resolve('')
+      return
+    }
+    if (entries.length === 0) {
+      resolve('')
+      return
+    }
+
+    const tryNext = (index: number): void => {
+      if (index >= entries.length) {
+        resolve('')
+        return
+      }
+      const sock = join(dir, entries[index].file.replace(/\.json$/, '.sock'))
+      let done = false
+      let buffer = ''
+      const socket = netConnect(sock)
+      const finish = (node: string): void => {
+        if (done) return
+        done = true
+        socket.destroy()
+        if (node) resolve(node)
+        else tryNext(index + 1)
+      }
+      socket.setTimeout(500, () => finish(''))
+      socket.on('error', () => finish(''))
+      socket.on('close', () => finish(''))
+      socket.on('data', (chunk) => {
+        buffer += chunk.toString('utf8')
+        const line = buffer.split('\n')[0]
+        if (!line) return
+        try {
+          const info = JSON.parse(line) as { ok?: boolean; node?: string }
+          finish(info.ok && info.node ? String(info.node) : '')
+        } catch {
+          finish('')
+        }
+      })
+      socket.on('connect', () => {
+        socket.write(JSON.stringify({ op: 'whoami' }) + '\n')
+      })
+    }
+    tryNext(0)
+  })
+}
+
+/**
  * 控制端到 relay 的连接管理。
  *
  * 两条连接类型：
@@ -12,12 +85,14 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { connect as netConnect } from 'node:net'
 import os from 'node:os'
 import { join } from 'node:path'
 import { app } from 'electron'
 import WebSocket from 'ws'
-import type { NodeInfo, RelayConfig, RelayStatus } from '../shared/ipc'
+import type {
+  ClientInfo, NodeInfo, RelayConfig, RelayStatus } from '../shared/ipc'
 import type { SessionState } from '../shared/protocol'
 
 interface RemoteSession {
@@ -75,8 +150,11 @@ export class RelayClient {
   private phase: RelayStatus['phase'] = 'idle'
   private agentOnline = false
   private hostname = ''
-  /** 本机主机名短名（不参与连接，只给界面认“我这台”） */
-  private readonly selfHost = os.hostname().split('.')[0] || ''
+  /** 在线客户端列表（relay 的内存表，断开即消失） */
+  private clients: ClientInfo[] = []
+  /** 我认领的宿主 node id：本机 agent，认领后不再变 */
+  private hostNode = ''
+
   /** 当前在线的节点列表（多机）。单机时只有一项。 */
   private nodes: NodeInfo[] = []
   /** 本机节点标识，用来判断「本机共享」是否可用。默认取主机名短名。 */
@@ -131,7 +209,8 @@ export class RelayClient {
       hostname: this.hostname,
       nodes: this.nodes,
       clientName: this.clientName,
-      selfHost: this.selfHost
+      clientId: this.clientId,
+      clients: this.clients
     }
   }
 
@@ -143,7 +222,8 @@ export class RelayClient {
       hostname: this.hostname,
       nodes: this.nodes,
       clientName: this.clientName,
-      selfHost: this.selfHost,
+      clientId: this.clientId,
+      clients: this.clients,
       message
     })
   }
@@ -157,7 +237,8 @@ export class RelayClient {
       hostname: this.hostname,
       nodes: this.nodes,
       clientName: this.clientName,
-      selfHost: this.selfHost
+      clientId: this.clientId,
+      clients: this.clients
     })
   }
 
@@ -192,6 +273,21 @@ export class RelayClient {
     this.setStatus(this.phase)
   }
 
+  /** 认领宿主并把归属告诉 relay —— 之后列表按客户端展示，进入就是进它。 */
+  private claimHost(node: string): void {
+    // 每次握手都重报一次：relay 的内存表随重启清空，只发一次会丢归属
+    if (!node) return
+    this.hostNode = node
+    const ws = this.ctl
+    if (ws && ws.readyState === 1) {
+      try {
+        ws.send(JSON.stringify({ type: 'CTL_HOST', host: node }))
+      } catch {
+        // ctl 刚断，下次 HELLO 后 updateNodes 会再报
+      }
+    }
+  }
+
   // ------------------------------------------------------------ 连接
 
   async connect(config: RelayConfig): Promise<RelayStatus> {
@@ -200,6 +296,8 @@ export class RelayClient {
     this.clearReconnect()
     this.closeCtl()
 
+    // 先问本机 agent「你是谁」：认领宿主是事实，不是从主机名推断出来的。
+    if (!this.hostNode) this.hostNode = await askLocalAgent()
     await this.openCtl()
     return this.status
   }
@@ -330,8 +428,8 @@ export class RelayClient {
     // relay 用它来决定无主会话归谁 —— 主窗口无标，副本窗口标共享，两边不会都标。
     const who = path.startsWith('/ctl')
       ? `&client=${encodeURIComponent(this.clientId)}&name=${encodeURIComponent(this.clientName)}${
-          process.env.RPTY_USERDATA ? '' : '&primary=1'
-        }`
+          this.hostNode ? `&host=${encodeURIComponent(this.hostNode)}` : ''
+        }${process.env.RPTY_USERDATA ? '' : '&primary=1'}`
       : ''
     return `${base}${path}${sep}token=${encodeURIComponent(this.config?.token ?? '')}${who}`
   }
@@ -434,15 +532,24 @@ export class RelayClient {
       case 'HELLO':
         // 重新连上 = 重新和宿主对表：之前手动撤掉的镜像会话，只要 PTY 还在就再挂回来。
         this.detached.clear()
+        if (Array.isArray(msg.clients)) this.clients = msg.clients as ClientInfo[]
         if (msg.nodes) this.updateNodes(msg.nodes)
         else this.setAgentOnline(Boolean(msg.agent_online))
         this.setStatus('online')
         this.backoff = 600
+        if (this.hostNode) this.claimHost(this.hostNode)
         this.resyncSessions()
         break
 
       case 'NODES':
         this.updateNodes(msg.nodes)
+        break
+
+      case 'CLIENTS':
+        if (Array.isArray(msg.clients)) {
+          this.clients = msg.clients as ClientInfo[]
+          this.setStatus(this.phase)
+        }
         break
 
       case 'NODE_ONLINE':

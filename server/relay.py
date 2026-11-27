@@ -38,7 +38,7 @@ import os
 import signal
 import sys
 import time
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import parse_qs, urlparse
 
 import websockets
@@ -130,6 +130,8 @@ class Relay:
         # 控制端自我名：客户端首次运行生成，不卸载重装就不变。
         # 用来在「配对断开」时告诉另一端是谁断的，也方便 healthz 排查。
         self.ctl_name: Dict[Any, str] = {}
+        # 这个客户端认领的宿主（node id）：客户端连上后自查“我这台机器的 agent”再上报。
+        self.ctl_host: Dict[Any, str] = {}
         # session_id -> 开它的客户端 id。重启 relay 会丢，客户端本地还存了一份。
         self.sid_owner: Dict[str, str] = {}
         # session_id -> relay 分配的编号。宿主进程可能还在自增自己的旧计数，
@@ -189,10 +191,7 @@ class Relay:
                     "ctl": len(self.ctls) > 0,
                     "ctls": len(self.ctls),
                     "nodes": nodes,
-                    "clients": [
-                        {"client": cid, "name": self.ctl_name.get(ws, "")}
-                        for ws, cid in self.ctl_client.items()
-                    ],
+                    "clients": self.clients_summary(),
                     "channels": len(self.channels),
                     "viewers": sum(len(c.viewers) for c in self.channels.values()),
                     **self.stats,
@@ -357,6 +356,39 @@ class Relay:
         await self.broadcast_ctls(
             {"type": "NODES", "nodes": [n.summary() for n in self.nodes.values()]}
         )
+        # 客户端列表里的「N 个终端」是算出来的，跟着一起刷新
+        await self.broadcast_clients()
+
+    def clients_summary(self) -> List[Dict[str, Any]]:
+        """在线客户端列表 —— 用户看到的就是这个，不是节点。
+
+        一个 client 开两个窗口会有两条 ctl，按 client id 合并：宿主信息取任意一条
+        有的，名字取第一条非空的。
+        """
+        merged: Dict[str, Dict[str, Any]] = {}
+        for ws in list(self.ctls):
+            cid = self.ctl_client.get(ws, "")
+            if not cid:
+                continue
+            item = merged.setdefault(
+                cid, {"client": cid, "name": "", "host": "", "online": True}
+            )
+            name = self.ctl_name.get(ws, "")
+            if name and not item["name"]:
+                item["name"] = name
+            host = self.ctl_host.get(ws, "")
+            if host and not item["host"]:
+                item["host"] = host
+        for item in merged.values():
+            node = self.nodes.get(item["host"]) if item["host"] else None
+            item["host_name"] = node.name if node else ""
+            item["host_online"] = bool(node and node.ws is not None)
+            sessions = (node.last_list or {}).get("sessions") if node else None
+            item["sessions"] = len(sessions or [])
+        return list(merged.values())
+
+    async def broadcast_clients(self) -> None:
+        await self.broadcast_ctls({"type": "CLIENTS", "clients": self.clients_summary()})
 
     def _apply_resize_to_lists(self, sid: str, cols: int, rows: int) -> None:
         """创建端改了窗口：把新尺寸写回缓存列表。
@@ -527,6 +559,9 @@ class Relay:
         client_name = ((query.get("name") or [""])[0] or "").strip()
         self.ctl_client[ws] = client_id
         self.ctl_name[ws] = client_name
+        host_hint = ((query.get("host") or [""])[0] or "").strip()
+        if host_hint:
+            self.ctl_host[ws] = host_hint
         # 谁是「无主会话」的主人：优先主窗口（默认数据目录，primary=1）。
         # 副本窗口即使先连上，也只是临时拿着，主窗口一连上就整体移交，
         # 这样不会因为启动顺序不同而让同一台终端换主人。
@@ -540,6 +575,7 @@ class Relay:
                 self._save_state()
                 LOG.info("默认认领者设为 %s（副本窗口）", client_id[:8])
         LOG.info("ctl 上线 %s（当前 %d 个，client=%s）", ws.remote_address, len(self.ctls), client_id[:8] or "-")
+        await self.broadcast_clients()
 
         await self.send_json(
             ws,
@@ -547,6 +583,7 @@ class Relay:
                 "type": "HELLO",
                 "agent_online": any(n.ws is not None for n in self.nodes.values()),
                 "nodes": [n.summary() for n in self.nodes.values()],
+                "clients": self.clients_summary(),
                 "server_time": int(time.time()),
                 "version": "1.3.0",
             },
@@ -573,25 +610,25 @@ class Relay:
 
                 msg_type = msg.get("type")
 
+                if msg_type == "CTL_HOST":
+                    # 客户端认领了自己的宿主（本机 agent）。列表按客户端展示，
+                    # 这条归属决定了「进入这个客户端」到底连到哪台机器的终端。
+                    host = str(msg.get("host") or "").strip()
+                    if self.ctl_host.get(ws) != host:
+                        self.ctl_host[ws] = host
+                        LOG.info("客户端 %s 认领宿主 %s", (self.ctl_client.get(ws) or "-")[:8], host or "-")
+                        await self.broadcast_clients()
+                    continue
+
                 if msg_type == "CTL_LEAVE":
-                    # 一个控制端主动点了「断开连接」：这条链路算一组，通知其它端一起断。
-                    # 只在显式消息里做 —— 网络掉线不走这里，不会把别人的会话误伤掉。
-                    payload = {
-                        "type": "PAIR_CLOSED",
-                        "by": str(msg.get("by") or ""),
-                        "by_name": self.ctl_name.get(ws, ""),
-                        "at": int(time.time()),
-                    }
-                    peers = 0
-                    for peer in list(self.ctls):
-                        if peer is ws:
-                            continue
-                        await self.send_json(peer, payload)
-                        peers += 1
+                    # 客户端主动断开：**不连坐别人**。每个客户端是独立个体，
+                    # 它走了只是从在线列表里消失，别人照常连着。
+                    # 名字和宿主先留着 —— 等 ws 真断掉，finally 里连人带记录一起移除，
+                    # 期间列表不会闪出一条「没有名字、宿主未上线」的僵尸卡。
                     LOG.info(
-                        "ctl 主动断开（client=%s），已通知 %d 个其它控制端",
+                        "客户端 %s 主动断开（%s）",
                         str(msg.get("by") or "-")[:8],
-                        peers,
+                        self.ctl_name.get(ws, "") or "-",
                     )
                     continue
 
@@ -713,7 +750,10 @@ class Relay:
             self.ctls.discard(ws)
             self.ctl_client.pop(ws, None)
             self.ctl_name.pop(ws, None)
+            self.ctl_host.pop(ws, None)
             LOG.info("ctl 下线 %s（剩 %d 个）", ws.remote_address, len(self.ctls))
+            # 在线列表就是"此刻连着 wss 的客户端"，走了立刻从列表里消失
+            await self.broadcast_clients()
             if not self.ctls:
                 for node in self.nodes.values():
                     if node.ws is not None:

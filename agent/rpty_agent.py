@@ -244,6 +244,28 @@ class Session:
 DEFAULT_STATE = os.path.expanduser("~/.rpty/agent.json")
 
 
+def registry_dir() -> str:
+    """本机 agent 的注册目录：一个 agent 一个 <node>.json + <node>.sock。
+
+    客户端不猜主机名，直接连这个本地 socket 问「你是谁」—— 这样"我这台机器的宿主"
+    是确定的事实，不是推断。
+    """
+    raw = os.environ.get("RPTY_REGISTRY") or "~/.rpty/agents"
+    return os.path.expanduser(raw)
+
+
+def _safe(node: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in node) or "default"
+
+
+def sock_path(node: str) -> str:
+    return os.path.join(registry_dir(), f"{_safe(node)}.sock")
+
+
+def registry_path(node: str) -> str:
+    return os.path.join(registry_dir(), f"{_safe(node)}.json")
+
+
 def state_path() -> str:
     """状态文件位置：默认 ~/.rpty/agent.json，可用 RPTY_STATE 指到别处（同机多开用）。"""
     return os.path.expanduser(os.environ.get("RPTY_STATE", DEFAULT_STATE))
@@ -309,6 +331,11 @@ class Agent:
         self.backoff = 1.0
         # relay 没回 index 时的兜底（老 relay）。正常情况下编号由 relay 全局分配。
         self.seq = 0
+        # 本地端点：让同一台机器上的客户端能确定地认领"自己的宿主"
+        self.started_at = int(time.time())
+        self._local_server: Optional[Any] = None
+        self.sock_file = ""
+        self.reg_file = ""
 
     @property
     def signal_url(self) -> str:
@@ -320,6 +347,92 @@ class Agent:
             f"{self.relay}/d/{data_token}"
             f"?role=agent&node={quote(self.node_id)}&token={self.token}"
         )
+
+    # ------------------------------------------------------------ 本地端点
+
+    async def start_local(self) -> None:
+        """在 ~/.rpty/agents/<node>.sock 上开一个极简端点，只回答"我是谁"。
+
+        客户端连上来问一句就能拿到 node id，不用再从 hostname 猜 —— 认领变成事实。
+        """
+        os.makedirs(registry_dir(), exist_ok=True)
+        self.sock_file = sock_path(self.node_id)
+        self.reg_file = registry_path(self.node_id)
+        for path in (self.sock_file, self.reg_file):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        self._local_server = await asyncio.start_unix_server(
+            self._handle_local, path=self.sock_file
+        )
+        try:
+            os.chmod(self.sock_file, 0o600)
+        except OSError:
+            pass
+        record = {
+            "node": self.node_id,
+            "name": self.name,
+            "hostname": self.hostname,
+            "pid": os.getpid(),
+            "started_at": self.started_at,
+            "sock": self.sock_file,
+        }
+        try:
+            with open(self.reg_file, "w", encoding="utf-8") as fh:
+                json.dump(record, fh, ensure_ascii=False)
+        except OSError:
+            LOG.warning("注册文件写不进去：%s", self.reg_file)
+        LOG.info("本地端点就绪 %s", self.sock_file)
+
+    def stop_local(self) -> None:
+        if self._local_server is not None:
+            try:
+                self._local_server.close()
+            except Exception:  # noqa: BLE001
+                pass
+        for path in (self.sock_file, self.reg_file):
+            if not path:
+                continue
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    async def _handle_local(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            line = await asyncio.wait_for(reader.readline(), timeout=3)
+            req: Dict[str, Any] = {}
+            if line:
+                try:
+                    parsed = json.loads(line.decode("utf-8", "replace"))
+                    if isinstance(parsed, dict):
+                        req = parsed
+                except ValueError:
+                    req = {}
+            op = str(req.get("op") or "whoami")
+            if op == "whoami":
+                payload = {
+                    "ok": True,
+                    "node": self.node_id,
+                    "name": self.name,
+                    "hostname": self.hostname,
+                    "pid": os.getpid(),
+                    "started_at": self.started_at,
+                    "sessions": len([x for x in self.sessions.values() if not x.closed]),
+                    "version": 1,
+                }
+            else:
+                payload = {"ok": False, "error": f"unknown op {op}"}
+            writer.write(json.dumps(payload, ensure_ascii=False).encode() + b"\n")
+            await writer.drain()
+        except (asyncio.TimeoutError, ConnectionError, OSError):
+            pass
+        finally:
+            try:
+                writer.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ------------------------------------------------------------ 主循环
 
@@ -613,6 +726,7 @@ async def amain() -> None:
         except NotImplementedError:
             pass
 
+    await agent.start_local()
     runner = asyncio.create_task(agent.run())
     await stop
     # 先告别再断电：让另一端立刻清掉本节点的标签，不用等离线超时。
@@ -621,6 +735,7 @@ async def amain() -> None:
     runner.cancel()
     for session in list(agent.sessions.values()):
         session.close()
+    agent.stop_local()
     LOG.info("agent 退出")
 
 
