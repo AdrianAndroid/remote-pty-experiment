@@ -1,2 +1,5 @@
 packages:
   - 'apps/*'
+# electron-winstaller 只在打 Windows 安装包时用到，macOS 上明确不跑它的安装脚本
+allowBuilds:
+  electron-winstaller: false

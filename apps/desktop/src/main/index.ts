@@ -14,6 +14,14 @@ import { loadConfig, saveConfig } from './store'
 
 let win: BrowserWindow | null = null
 
+// 打包后 app.getName() 会变成 productName（rpty），userData 目录会跟着换，
+// 导致开发版填过的 relay 地址和 token 在 .app 里读不到。这里固定成开发时的名字。
+// 同一台机器要跑两个实例时，用 RPTY_USERDATA 指到另一个目录，避免缓存目录互锁。
+app.setPath(
+  'userData',
+  process.env.RPTY_USERDATA || join(app.getPath('appData'), 'rpty-desktop')
+)
+
 const relay = new RelayClient({
   onStatus: (status) => send(IpcChannel.RelayStatusChanged, status),
   onData: (leafId, data) => send(IpcChannel.SessionData, { leafId, data }),

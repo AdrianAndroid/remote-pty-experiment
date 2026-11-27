@@ -71,6 +71,7 @@
 | [docs/20-relay-service.md](docs/20-relay-service.md) | **服务端工程方案**：技术栈、单进程约束、Caddy + systemd、运维 |
 | [docs/21-docker-deploy.md](docs/21-docker-deploy.md) | **Docker 部署**：单容器双进程、三个必踩的坑 |
 | [docs/22-environment-verified.md](docs/22-environment-verified.md) | **环境实测记录**：公司机 Python / PTY / 出站 wss 全部验证通过 |
+| [docs/25-runbook.md](docs/25-runbook.md) | **运行手册**：三件的启停、升级、排障对照表 |
 | [openspec/](openspec/) | 需求规格与变更（本项目所有功能变更必须先立 OpenSpec change） |
 
 > 阅读顺序建议：`00 → 22 → 01 → 02 → 03 → 08 → 12 → 14 → 15 → 16 → 17 → 18 → 19 → 13 → 11 → 09`。
@@ -78,23 +79,32 @@
 
 ---
 
-## 快速开始（待实现）
+## 现在怎么跑
+
+三件已经跑起来了，完整运维细节见 [docs/25-runbook.md](docs/25-runbook.md)。
 
 ```bash
-# 云主机
-pip install websockets
-python3 relay.py --port 8765
+# 1. relay（阿里云 8.152.204.58，Docker，已经在跑）
+cd /opt/1panel/apps/rpty && docker compose ps
+curl https://rpty.zhaojian.xin/healthz        # {"ok":true,"agent":true,...}
 
-# 公司 Mac（Agent）
-pip install websockets
-python3 agent_mac.py --url wss://your.domain/ws --token <AGENT_TOKEN>
+# 2. agent（家里 Mac mini，launchd 常驻，开机自启）
+launchctl list | grep rpty
+launchctl kickstart -k gui/$(id -u)/xin.zhaojian.rpty-agent
 
-# 家 Mac（Terminal）
-python3 term_mac.py --url wss://your.domain/ws --token <TERM_TOKEN>
-# 或浏览器打开 web/index.html
+# 3. 客户端（MacBook Pro）
+open /Applications/rpty.app
 ```
 
-> 代码目录尚未创建，当前仓库处于**方案定型阶段**，先落文档、协议与 OpenSpec 变更，再进入编码。
+首次运行在连接页填 `wss://rpty.zhaojian.xin` 和 token（服务器 `/opt/1panel/apps/rpty/.env` 里的 `RPty_TOKEN`），之后自动连、自动开一个终端。
+
+开发态：
+
+```bash
+pnpm install
+cd apps/desktop && pnpm dev          # 热更新开发
+cd apps/desktop && pnpm pack:mac     # 打 .app 到 apps/desktop/release/mac-arm64/
+```
 
 ---
 
@@ -103,18 +113,17 @@ python3 term_mac.py --url wss://your.domain/ws --token <TERM_TOKEN>
 ```
 remote-pty-experiment/
 ├── README.md
-├── docs/                     # 方案文档
-├── openspec/                 # 需求规格与变更
-├── relay/                    # 云主机中继服务
-│   └── relay.py
-├── agent/                    # 公司 Mac 端
-│   ├── agent_mac.py
-│   └── com.remotepty.agent.plist   # launchd 常驻
-├── client/                   # 家 Mac 本地终端客户端
-│   └── term_mac.py
-├── web/                      # 浏览器终端
-│   └── index.html
-└── scripts/                  # 部署与自检脚本
+├── docs/                      # 方案文档（25 = 运行手册）
+├── openspec/                  # 需求规格与变更
+├── server/                    # 云主机中继（Python 3.10 + websockets 12 + Docker）
+│   ├── relay.py
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   └── requirements.txt
+├── agent/                     # 被控 Mac 的 PTY 宿主
+│   └── rpty_agent.py
+└── apps/desktop/              # Electron 客户端
+    └── src/{main,preload,renderer,shared}
 ```
 
 ---
@@ -122,15 +131,15 @@ remote-pty-experiment/
 ## 状态
 
 - [x] 方案调研与可行性验证（frp 已证实不可用）
-- [x] 架构与协议 v1 定稿
-- [x] 大胆设计（加密 / mux / broker）与架构图集
-- [x] **对称 Peer 模型定稿**：去掉 agent / terminal 角色，两端同一份代码
-- [ ] OpenSpec 变更 `add-pty-ws-relay` + `make-peers-symmetric` 实施
-- [ ] 最小可运行链路（单方向 shell）
-- [ ] 双向对称（A→B 与 B→A 并发）
-- [ ] PTY + resize 完整交互
-- [ ] 浏览器终端
-- [ ] 菜单栏常驻 + 自动重连
+- [x] 架构与协议定稿（双连接 `/ctl` + 每会话 `/d/<token>`）
+- [x] relay 实现并部署（阿里云 Docker + openresty 反代 + Let's Encrypt）
+- [x] agent 实现（`pty.fork()` 真 PTY、resize、重连重放、幂等建会话）
+- [x] Electron 客户端（左侧竖向标签列、多终端并行、WebGL 按需挂载）
+- [x] 三机端到端打通：命令 / `hostname` / `stty size` / `vim` 均正确
+- [x] agent 装成 launchd 服务（开机自启、崩溃自拉起）
+- [x] 客户端打成 `.app`（`pnpm pack:mac`）
+- [ ] Windows / Linux 客户端
+- [ ] PSK 握手与会话级一次一密
 
 ---
 

@@ -34,9 +34,12 @@ export default function App(): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
-  const creatingRef = useRef(false)
+  const seqRef = useRef(0)
+  const autoCreatedRef = useRef(false)
   const activeIdRef = useRef<string | null>(null)
+  const sessionsRef = useRef<SessionMeta[]>([])
   activeIdRef.current = activeId
+  sessionsRef.current = sessions
 
   // ---------------------------------------------------------- 初始化
 
@@ -80,30 +83,24 @@ export default function App(): React.JSX.Element {
   // ---------------------------------------------------------- 会话操作
 
   const createSession = useCallback(async () => {
-    if (creatingRef.current) return
-    if (sessions.length >= MAX_SESSIONS) {
+    if (sessionsRef.current.length >= MAX_SESSIONS) {
       setError(`最多 ${MAX_SESSIONS} 个终端`)
       return
     }
-    creatingRef.current = true
     setError('')
     const { cols, rows } = estimateSize()
     const leafId = crypto.randomUUID()
-    try {
-      const result = await window.rpty.create({ leafId, cols, rows })
-      if (!result.ok) {
-        setError(result.error ?? '创建终端失败')
-        return
-      }
-      setSessions((prev) => [
-        ...prev,
-        { id: leafId, title: `终端 ${prev.length + 1}`, state: 'connecting' }
-      ])
-      setActiveId(leafId)
-    } finally {
-      creatingRef.current = false
+    const title = `终端 ${++seqRef.current}`
+    // 先乐观插标签再发请求：连点两下会立刻出现两个标签，
+    // 各自走自己的 IPC，不会因为上一发还没回来就被吃掉。
+    setSessions((prev) => [...prev, { id: leafId, title, state: 'connecting' }])
+    setActiveId(leafId)
+    const result = await window.rpty.create({ leafId, cols, rows })
+    if (!result.ok) {
+      setSessions((prev) => prev.filter((item) => item.id !== leafId))
+      setError(result.error ?? '创建终端失败')
     }
-  }, [sessions.length])
+  }, [])
 
   const closeSession = useCallback(
     async (leafId: string) => {
@@ -142,9 +139,12 @@ export default function App(): React.JSX.Element {
     [sessions]
   )
 
-  // 连上且被控端在线但没有终端时，自动开一个。
+  // 连上且被控端在线但没有终端时，自动开一个（只自动开一次，
+  // 失败回滚成 0 个时不再反复重建）。
   useEffect(() => {
+    if (autoCreatedRef.current) return
     if (status.phase === 'online' && status.agentOnline && sessions.length === 0) {
+      autoCreatedRef.current = true
       void createSession()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

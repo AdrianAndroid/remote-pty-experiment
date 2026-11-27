@@ -30,7 +30,7 @@ import os
 import signal
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 from urllib.parse import parse_qs, urlparse
 
 import websockets
@@ -49,7 +49,9 @@ class Relay:
         self.pair_timeout = pair_timeout
 
         self.agent: Optional[WebSocketServerProtocol] = None
-        self.ctl: Optional[WebSocketServerProtocol] = None
+        # 允许多个控制端同时在线（同一台被控机，多个窗口/多台客户端各开各的会话）。
+        # 会话是端到端配对的，/ctl 只是信令总线，多一个 ctl 不会串数据。
+        self.ctls: Set[WebSocketServerProtocol] = set()
 
         # data_token -> 先到的那一端
         self.pending: Dict[str, WebSocketServerProtocol] = {}
@@ -90,7 +92,8 @@ class Relay:
                     "ok": True,
                     "uptime": int(time.time() - self.started_at),
                     "agent": self.agent is not None,
-                    "ctl": self.ctl is not None,
+                    "ctl": len(self.ctls) > 0,
+                    "ctls": len(self.ctls),
                     "pending_channels": len(self.pending),
                     **self.stats,
                 },
@@ -125,6 +128,15 @@ class Relay:
 
     # ---------------------------------------------------------------- 信令
 
+    async def broadcast_ctls(self, payload: Dict[str, Any]) -> None:
+        """把 agent 的消息广播给所有在线控制端。
+
+        各客户端只认自己 bySessionId 里的 session_id，别人的会话消息会被忽略，
+        所以广播是安全的；不用为每个会话追踪它属于哪个 ctl。
+        """
+        for ctl in list(self.ctls):
+            await self.send_json(ctl, payload)
+
     async def handle_agent(self, ws: WebSocketServerProtocol) -> None:
         previous = self.agent
         self.agent = ws
@@ -133,9 +145,7 @@ class Relay:
             await previous.close(code=4002, reason="replaced")
 
         LOG.info("agent 上线 %s", ws.remote_address)
-        await self.send_json(
-            self.ctl, {"type": "AGENT_ONLINE", "at": int(time.time())}
-        )
+        await self.broadcast_ctls({"type": "AGENT_ONLINE", "at": int(time.time())})
 
         try:
             async for raw in ws:
@@ -146,33 +156,30 @@ class Relay:
                     continue
                 if not isinstance(msg, dict):
                     continue
-                await self.send_json(self.ctl, {**msg, "src": "agent"})
+                await self.broadcast_ctls({**msg, "src": "agent"})
         except ConnectionClosed:
             pass
         finally:
             if self.agent is ws:
                 self.agent = None
                 LOG.info("agent 下线")
-                await self.send_json(self.ctl, {"type": "AGENT_OFFLINE"})
+                await self.broadcast_ctls({"type": "AGENT_OFFLINE"})
 
     async def handle_ctl(self, ws: WebSocketServerProtocol) -> None:
-        previous = self.ctl
-        self.ctl = ws
-        if previous is not None and previous is not ws:
-            LOG.info("ctl 重连，顶掉旧连接")
-            await previous.close(code=4002, reason="replaced")
+        self.ctls.add(ws)
+        LOG.info("ctl 上线 %s（当前 %d 个）", ws.remote_address, len(self.ctls))
 
-        LOG.info("ctl 上线 %s", ws.remote_address)
         await self.send_json(
             ws,
             {
                 "type": "HELLO",
                 "agent_online": self.agent is not None,
                 "server_time": int(time.time()),
-                "version": "1.0.0",
+                "version": "1.1.0",
             },
         )
         if self.agent is not None:
+            # 让 agent 补发一次会话列表，新连上的控制端才知道被控机叫什么、有哪些会话。
             await self.send_json(self.agent, {"type": "CTL_ONLINE"})
 
         try:
@@ -208,9 +215,9 @@ class Relay:
         except ConnectionClosed:
             pass
         finally:
-            if self.ctl is ws:
-                self.ctl = None
-                LOG.info("ctl 下线")
+            self.ctls.discard(ws)
+            LOG.info("ctl 下线 %s（剩 %d 个）", ws.remote_address, len(self.ctls))
+            if not self.ctls and self.agent is not None:
                 await self.send_json(self.agent, {"type": "CTL_OFFLINE"})
 
     # ---------------------------------------------------------------- 数据
