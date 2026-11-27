@@ -61,9 +61,10 @@
 | [docs/11-relay-design.md](docs/11-relay-design.md) | **Relay 服务端设计**：在线表、DIAL 信令、桥接、限流、代码骨架 |
 | [docs/12-concept-model.md](docs/12-concept-model.md) | **概念模型与术语表**：宿主/控制方是会话关系而非身份 |
 | [docs/13-relay-lite.md](docs/13-relay-lite.md) | **Relay 轻量化**：房间模型，90 行零配置，数据全留宿主 |
+| [docs/14-one-to-one.md](docs/14-one-to-one.md) | **一对一 · 单向建链 · 双向使用**：最终收敛模型（删掉撞车与多桥） |
 | [openspec/](openspec/) | 需求规格与变更（本项目所有功能变更必须先立 OpenSpec change） |
 
-> 阅读顺序建议：`01 → 02 → 03 → 08 → 10 → 12 → 13 → 11 → 09`。
+> 阅读顺序建议：`01 → 02 → 03 → 08 → 12 → 14 → 13 → 11 → 09`。
 > `02` / `03` 中关于固定角色（agent / terminal）的部分已被 `10` 取代，其余内容仍然有效。
 
 ---
