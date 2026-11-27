@@ -54,8 +54,14 @@
 | [docs/04-capability-matrix.md](docs/04-capability-matrix.md) | 哪些 CLI 能正常用、哪些有坑、验收标准 |
 | [docs/05-decisions.md](docs/05-decisions.md) | 技术选型决策记录（ADR） |
 | [docs/06-risks.md](docs/06-risks.md) | 风险、合规边界、故障排查 |
-| [docs/07-roadmap.md](docs/07-roadmap.md) | 里程碑与迭代计划 |
+| [docs/07-roadmap.md](docs/07-roadmap.md) | 里程碑与迭代计划（保守版基线） |
+| [docs/08-bold-design.md](docs/08-bold-design.md) | 大胆设计：盲中继 + 多路复用 + Session Broker |
+| [docs/09-architecture-diagram.md](docs/09-architecture-diagram.md) | 架构图集（三端全景 / 分层栈 / 时序 / 帧结构） |
+| [docs/10-symmetric-peer.md](docs/10-symmetric-peer.md) | **对称 Peer 设计：双向、无固定角色**（取代 02 的角色模型） |
 | [openspec/](openspec/) | 需求规格与变更（本项目所有功能变更必须先立 OpenSpec change） |
+
+> 阅读顺序建议：`01 → 02 → 03 → 08 → 10 → 09`。
+> `02` / `03` 中关于固定角色（agent / terminal）的部分已被 `10` 取代，其余内容仍然有效。
 
 ---
 
@@ -103,12 +109,15 @@ remote-pty-experiment/
 ## 状态
 
 - [x] 方案调研与可行性验证（frp 已证实不可用）
-- [x] 架构与协议定稿
-- [ ] OpenSpec 变更 `add-pty-ws-relay` 实施
-- [ ] 最小可运行链路（行模式打通）
+- [x] 架构与协议 v1 定稿
+- [x] 大胆设计（加密 / mux / broker）与架构图集
+- [x] **对称 Peer 模型定稿**：去掉 agent / terminal 角色，两端同一份代码
+- [ ] OpenSpec 变更 `add-pty-ws-relay` + `make-peers-symmetric` 实施
+- [ ] 最小可运行链路（单方向 shell）
+- [ ] 双向对称（A→B 与 B→A 并发）
 - [ ] PTY + resize 完整交互
 - [ ] 浏览器终端
-- [ ] launchd 常驻 + 自动重连
+- [ ] 菜单栏常驻 + 自动重连
 
 ---
 

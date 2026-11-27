@@ -1,5 +1,8 @@
 # 03 · WebSocket 帧协议
 
+> **部分内容已被 `docs/10-symmetric-peer.md` 取代。** 具体是：`auth` 帧的 `role` 字段（改为 `node_id` + 签名）、relay 按角色槽位配对的模型（改为 `REGISTER` / `DIAL` 在线表）、单连接单通道（改为多通道 + 方向位）。
+> 仍然有效的部分：`data` 的 base64 / 二进制约定、`resize` 语义、心跳双层策略、close code 约定、PTY 环境变量注入。
+
 URI：`wss://<domain>/ws`
 传输：文本帧，内容为 UTF-8 JSON。二进制数据统一 base64 承载。
 
