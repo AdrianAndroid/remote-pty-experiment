@@ -12,7 +12,10 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
+import { join } from 'node:path'
+import { app } from 'electron'
 import WebSocket from 'ws'
 import type { NodeInfo, RelayConfig, RelayStatus } from '../shared/ipc'
 import type { SessionState } from '../shared/protocol'
@@ -49,6 +52,8 @@ export interface RelayHandlers {
     node: string
   ): void
   onError(code: string, message: string): void
+  /** 会话归属变了（relay 告诉了我们谁是主人，或者别的窗口关了它）。 */
+  onOwned(leafId: string, owned: boolean): void
 }
 
 const CONNECT_TIMEOUT = 12_000
@@ -82,6 +87,13 @@ export class RelayClient {
   private reconnectTimer: NodeJS.Timeout | null = null
   private resyncTimer: NodeJS.Timeout | null = null
   private manualClose = false
+  /**
+   * 这个客户端自己的身份证。存储在 userData 里，重启不变 ——
+   * 不靠它，客户端一重启就忘了哪些终端是自己开的，Tab 会整片变成「共享」。
+   */
+  private readonly clientId = loadClientId()
+  /** 自己开过的 sessionId。relay 重启会丢归属，这里留一份兜底。 */
+  private readonly ownedIds = loadOwned()
 
   constructor(private readonly handlers: RelayHandlers) {}
 
@@ -200,7 +212,8 @@ export class RelayClient {
   private wsUrl(path: string): string {
     const base = (this.config?.url ?? '').replace(/\/+$/, '')
     const sep = path.includes('?') ? '&' : '?'
-    return `${base}${path}${sep}token=${encodeURIComponent(this.config?.token ?? '')}`
+    const who = path.startsWith('/ctl') ? `&client=${encodeURIComponent(this.clientId)}` : ''
+    return `${base}${path}${sep}token=${encodeURIComponent(this.config?.token ?? '')}${who}`
   }
 
   private openCtl(): Promise<void> {
@@ -433,14 +446,26 @@ export class RelayClient {
       const token = String(entry.data_token ?? '')
       if (!sid || !token) continue
       seen.add(sid)
-      if (this.bySessionId.has(sid)) continue
+      const ownerId = String(entry.owner ?? '')
+      const existing = this.bySessionId.get(sid)
+      if (existing) {
+        // 归属会变：可能是这个客户端重启前开的（relay 有记录），
+        // 也可能是另一个窗口开的。变了就得把「共享」标撕掉或贴上。
+        const owned = this.isMine(sid, ownerId)
+        if (existing.owned !== owned) {
+          existing.owned = owned
+          this.handlers.onOwned(existing.leafId, owned)
+        }
+        continue
+      }
       this.adopt(
         sid,
         token,
         Number(entry.cols ?? 80) || 80,
         Number(entry.rows ?? 24) || 24,
         Number(entry.index ?? 0) || 0,
-        node
+        node,
+        ownerId
       )
     }
 
@@ -457,13 +482,19 @@ export class RelayClient {
     }
   }
 
+  private isMine(sessionId: string, ownerId: string): boolean {
+    // relay 的归属最权威；relay 重启过、还没重新认领的，退回本地那份记录。
+    return (!!ownerId && ownerId === this.clientId) || this.ownedIds.has(sessionId)
+  }
+
   private adopt(
     sessionId: string,
     dataToken: string,
     cols: number,
     rows: number,
     index: number,
-    node = ''
+    node = '',
+    ownerId = ''
   ): void {
     // 镜像会话直接用 sessionId 当 leafId：它本来就在全局唯一，不需要再造一个。
     const leafId = sessionId
@@ -478,14 +509,14 @@ export class RelayClient {
       dataWs: null,
       dataTimer: null,
       pending: [],
-      owned: false,
+      owned: this.isMine(sessionId, ownerId),
       node
     }
     this.sessions.set(leafId, session)
     this.bySessionId.set(sessionId, session)
     if (this.pendingReady.delete(leafId)) this.markReady(leafId)
     this.indexLeaves.set(sessionId, index)
-    this.handlers.onAdopted(leafId, sessionId, cols, rows, false, index, node)
+    this.handlers.onAdopted(leafId, sessionId, cols, rows, session.owned, index, node)
     this.openData(session)
   }
 
@@ -535,6 +566,8 @@ export class RelayClient {
     }
     this.sessions.set(leafId, session)
     this.bySessionId.set(sessionId, session)
+    this.ownedIds.add(sessionId)
+    saveOwned(this.ownedIds)
     if (this.pendingReady.delete(leafId)) this.markReady(leafId)
 
     this.sendSignal({
@@ -598,6 +631,7 @@ export class RelayClient {
     this.sessions.delete(leafId)
     this.bySessionId.delete(session.sessionId)
     this.readyLeaves.delete(leafId)
+    if (this.ownedIds.delete(session.sessionId)) saveOwned(this.ownedIds)
     this.buffered.delete(leafId)
     this.pendingReady.delete(leafId)
   }
@@ -722,5 +756,38 @@ export class RelayClient {
         // ignore
       }
     }
+  }
+}
+
+function loadClientId(): string {
+  const file = join(app.getPath('userData'), 'client-id')
+  try {
+    if (existsSync(file)) {
+      const saved = readFileSync(file, 'utf8').trim()
+      if (saved) return saved
+    }
+    const created = randomUUID()
+    writeFileSync(file, created, 'utf8')
+    return created
+  } catch {
+    return randomUUID()
+  }
+}
+
+function loadOwned(): Set<string> {
+  try {
+    const raw = readFileSync(join(app.getPath('userData'), 'owned-sessions.json'), 'utf8')
+    const list = JSON.parse(raw)
+    return new Set(Array.isArray(list) ? list.filter((v): v is string => typeof v === 'string') : [])
+  } catch {
+    return new Set()
+  }
+}
+
+function saveOwned(ids: Set<string>): void {
+  try {
+    writeFileSync(join(app.getPath('userData'), 'owned-sessions.json'), JSON.stringify([...ids]), 'utf8')
+  } catch {
+    // 写不进去就算了，最多是下次重启少认回几个终端。
   }
 }

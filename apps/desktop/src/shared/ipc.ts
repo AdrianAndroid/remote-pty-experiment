@@ -37,6 +37,8 @@ export const IpcChannel = {
   /** 主 -> 渲染：推送 */
   /** 主 -> 渲染：发现被控端上已有会话（别的客户端开的），自动挂上去镜像 */
   SessionAdopted: 'session:adopted',
+  /** 主 -> 渲染：会话归属变了（relay 认出了主人，或另一个窗口开了/关了它） */
+  SessionOwned: 'session:owned',
   SessionData: 'session:data',
   SessionStateChanged: 'session:state',
   SessionExit: 'session:exit',
@@ -160,6 +162,7 @@ export interface RptyBridge {
   onState(handler: (payload: SessionStatePayload) => void): () => void
   onExit(handler: (payload: SessionExitPayload) => void): () => void
   onAdopted(handler: (payload: SessionAdoptedPayload) => void): () => void
+  onOwned(handler: (payload: { leafId: string; owned: boolean }) => void): () => void
   onStatus(handler: (payload: RelayStatus) => void): () => void
   onError(handler: (payload: RelayErrorPayload) => void): () => void
   onMenu(handler: (command: MenuCommand, arg?: number) => void): () => void

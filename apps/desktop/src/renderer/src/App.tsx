@@ -115,6 +115,11 @@ export default function App(): React.JSX.Element {
       })
     })
 
+    // 归属可能后到：relay 认出这个终端是谁开的，或者另一个窗口刚把它关掉。
+    const offOwned = window.rpty.onOwned(({ leafId, owned }) => {
+      setSessions((prev) => prev.map((item) => (item.id === leafId ? { ...item, owned } : item)))
+    })
+
     const offError = window.rpty.onError(({ code, message }) => {
       setError(message ? `${message}（${code}）` : code)
     })
@@ -126,6 +131,7 @@ export default function App(): React.JSX.Element {
       offState()
       offExit()
       offAdopted()
+      offOwned()
       offError()
       offReadOnly()
     }

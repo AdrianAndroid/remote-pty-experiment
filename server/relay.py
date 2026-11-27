@@ -125,6 +125,10 @@ class Relay:
         self.sid_node: Dict[str, str] = {}
         # data_token -> node_id：数据通道建起来时若没带 node（老版本 agent），靠它兜底
         self.token_node: Dict[str, str] = {}
+        # ctl 连接 -> 客户端自报的稳定 id，用来判断「这个会话是谁开的」
+        self.ctl_client: Dict[Any, str] = {}
+        # session_id -> 开它的客户端 id。重启 relay 会丢，客户端本地还存了一份。
+        self.sid_owner: Dict[str, str] = {}
         # session_id -> relay 分配的编号。宿主进程可能还在自增自己的旧计数，
         # 广播列表时一律以这里为准，否则多节点下会出现两个「终端 9」。
         self.sid_index: Dict[str, int] = {}
@@ -216,8 +220,24 @@ class Relay:
         各客户端只认自己 bySessionId 里的 session_id，别人的会话消息会被忽略，
         所以广播是安全的；不用为每个会话追踪它属于哪个 ctl。
         """
+        if isinstance(payload.get("sessions"), list):
+            payload = self.decorate_sessions(payload)
         for ctl in list(self.ctls):
             await self.send_json(ctl, payload)
+
+    def decorate_sessions(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """广播前给每一行补上 owner：客户端靠它分清哪个终端是自己开的。
+
+        没有 owner 的（relay 重启前建的、或老版本客户端开的）留空，
+        客户端会退回自己本地记的那份。
+        """
+        rows = []
+        for item in payload.get("sessions") or []:
+            if isinstance(item, dict):
+                rows.append({**item, "owner": self.sid_owner.get(str(item.get("session_id") or ""), "")})
+            else:
+                rows.append(item)
+        return {**payload, "sessions": rows}
 
     async def broadcast_nodes(self) -> None:
         """节点上下线、改名、会话数变化时，把所有节点的概览推给控制端。"""
@@ -323,7 +343,10 @@ class Relay:
 
     async def handle_ctl(self, ws: WebSocketServerProtocol) -> None:
         self.ctls.add(ws)
-        LOG.info("ctl 上线 %s（当前 %d 个）", ws.remote_address, len(self.ctls))
+        query = parse_qs(urlparse(ws.path).query)
+        client_id = ((query.get("client") or [""])[0] or "").strip()
+        self.ctl_client[ws] = client_id
+        LOG.info("ctl 上线 %s（当前 %d 个，client=%s）", ws.remote_address, len(self.ctls), client_id[:8] or "-")
 
         await self.send_json(
             ws,
@@ -339,7 +362,7 @@ class Relay:
         # 每台机器上已经有谁在开终端，才不会急着自己新建一个。
         for node in self.nodes.values():
             if node.last_list is not None:
-                await self.send_json(ws, node.last_list)
+                await self.send_json(ws, self.decorate_sessions(node.last_list))
         # 再让每个节点补发一次权威列表（缓存可能过期：刚关/刚建）。
         for node in self.nodes.values():
             if node.ws is not None:
@@ -399,6 +422,9 @@ class Relay:
                         if sid:
                             LOG.debug("发号 sid=%s index=%s known=%s src=%s", sid[:8], msg["index"], known, msg_type)
                             self.sid_node[sid] = node.node_id
+                            client_id = self.ctl_client.get(ws, "")
+                            if client_id:
+                                self.sid_owner.setdefault(sid, client_id)
                         if token:
                             self.channels.setdefault(token, Channel()).node = node.node_id
                         self.stats["sessions_opened"] += 1
@@ -427,6 +453,7 @@ class Relay:
             pass
         finally:
             self.ctls.discard(ws)
+            self.ctl_client.pop(ws, None)
             LOG.info("ctl 下线 %s（剩 %d 个）", ws.remote_address, len(self.ctls))
             if not self.ctls:
                 for node in self.nodes.values():
