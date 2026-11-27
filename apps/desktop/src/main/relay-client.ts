@@ -36,7 +36,14 @@ export interface RelayHandlers {
   onData(leafId: string, data: Uint8Array): void
   onState(leafId: string, state: SessionState, message?: string): void
   onExit(leafId: string, exitCode?: number): void
-  onAdopted(leafId: string, sessionId: string, cols: number, rows: number): void
+  onAdopted(
+    leafId: string,
+    sessionId: string,
+    cols: number,
+    rows: number,
+    owned: boolean,
+    index: number
+  ): void
   onError(code: string, message: string): void
 }
 
@@ -58,6 +65,10 @@ export class RelayClient {
    */
   private readyLeaves = new Set<string>()
   private buffered = new Map<string, Buffer[]>()
+  /** 面板比会话先就绪时（新建终端就是这种顺序），先把 leafId 记着。 */
+  private pendingReady = new Set<string>()
+  /** sessionId -> 被控机上的序号 */
+  private indexLeaves = new Map<string, number>()
   /** 只读：连上了、画面在刷，但键盘输入与尺寸变更都不发给被控端。 */
   private readOnly = false
   private reconnectTimer: NodeJS.Timeout | null = null
@@ -344,7 +355,8 @@ export class RelayClient {
         sid,
         token,
         Number(entry.cols ?? 80) || 80,
-        Number(entry.rows ?? 24) || 24
+        Number(entry.rows ?? 24) || 24,
+        Number(entry.index ?? 0) || 0
       )
     }
 
@@ -359,7 +371,13 @@ export class RelayClient {
     }
   }
 
-  private adopt(sessionId: string, dataToken: string, cols: number, rows: number): void {
+  private adopt(
+    sessionId: string,
+    dataToken: string,
+    cols: number,
+    rows: number,
+    index: number
+  ): void {
     // 镜像会话直接用 sessionId 当 leafId：它本来就在全局唯一，不需要再造一个。
     const leafId = sessionId
     if (this.sessions.has(leafId)) return
@@ -377,7 +395,9 @@ export class RelayClient {
     }
     this.sessions.set(leafId, session)
     this.bySessionId.set(sessionId, session)
-    this.handlers.onAdopted(leafId, sessionId, cols, rows)
+    if (this.pendingReady.delete(leafId)) this.markReady(leafId)
+    this.indexLeaves.set(sessionId, index)
+    this.handlers.onAdopted(leafId, sessionId, cols, rows, false, index)
     this.openData(session)
   }
 
@@ -409,6 +429,7 @@ export class RelayClient {
     }
     this.sessions.set(leafId, session)
     this.bySessionId.set(sessionId, session)
+    if (this.pendingReady.delete(leafId)) this.markReady(leafId)
 
     this.sendSignal({
       type: 'SESSION_CREATE',
@@ -471,6 +492,7 @@ export class RelayClient {
     this.bySessionId.delete(session.sessionId)
     this.readyLeaves.delete(leafId)
     this.buffered.delete(leafId)
+    this.pendingReady.delete(leafId)
   }
 
   list(): string[] {
@@ -479,7 +501,12 @@ export class RelayClient {
 
   /** 渲染层面板就绪：把攒下的字节按到达顺序吐出去，之后转为实时推送。 */
   markReady(leafId: string): void {
-    if (!this.sessions.has(leafId)) return
+    if (!this.sessions.has(leafId)) {
+      // 渲染层乐观插了标签、xterm 已经 open，但 create 的 IPC 还没到这一层。
+      // 直接 return 会让之后所有字节永远卡在 buffered 里，画面一片空白。
+      this.pendingReady.add(leafId)
+      return
+    }
     this.readyLeaves.add(leafId)
     const queue = this.buffered.get(leafId)
     if (!queue) return
@@ -490,14 +517,23 @@ export class RelayClient {
   }
 
   /** 当前所有会话的完整信息，供后加载的渲染层一次性补齐标签。 */
-  snapshot(): Array<{ leafId: string; sessionId: string; cols: number; rows: number }> {
+  snapshot(): Array<{
+    leafId: string
+    sessionId: string
+    cols: number
+    rows: number
+    owned: boolean
+    index: number
+  }> {
     return [...this.sessions.values()]
       .filter((session) => session.state !== 'exited')
       .map((session) => ({
         leafId: session.leafId,
         sessionId: session.sessionId,
         cols: session.cols,
-        rows: session.rows
+        rows: session.rows,
+        owned: session.owned,
+        index: this.indexLeaves.get(session.sessionId) ?? 0
       }))
   }
 

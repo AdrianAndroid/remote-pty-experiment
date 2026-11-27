@@ -28,8 +28,8 @@ const relay = new RelayClient({
   onState: (leafId, state, message) =>
     send(IpcChannel.SessionStateChanged, { leafId, state, message }),
   onExit: (leafId, exitCode) => send(IpcChannel.SessionExit, { leafId, exitCode }),
-  onAdopted: (leafId, sessionId, cols, rows) =>
-    send(IpcChannel.SessionAdopted, { leafId, sessionId, cols, rows }),
+  onAdopted: (leafId, sessionId, cols, rows, owned, index) =>
+    send(IpcChannel.SessionAdopted, { leafId, sessionId, cols, rows, owned, index }),
   onError: (code, message) => send(IpcChannel.RelayError, { code, message })
 })
 

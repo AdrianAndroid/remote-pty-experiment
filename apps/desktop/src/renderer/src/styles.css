@@ -609,3 +609,25 @@ code {
   margin-right: 8px;
   color: #f0b429;
 }
+
+/* ---------------------------------------------------------------- 标签归属 */
+
+.tab__title--mirror {
+  color: var(--text-dim);
+}
+
+.tab__badge {
+  margin-left: auto;
+  padding: 0 5px;
+  border: 1px solid var(--accent-dim);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 9.5px;
+  line-height: 15px;
+  letter-spacing: 0.3px;
+  opacity: 0.85;
+}
+
+.tab--active .tab__badge {
+  opacity: 1;
+}

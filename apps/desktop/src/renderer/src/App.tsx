@@ -58,7 +58,18 @@ export default function App(): React.JSX.Element {
         const known = new Set(prev.map((item) => item.id))
         const added = list
           .filter((item) => !known.has(item.leafId))
-          .map((item) => ({ id: item.leafId, title: `终端 ${++seqRef.current}`, state: 'active' as const }))
+          .map((item) => {
+            // 编号跟被控机走：两个窗口看到的是同一个「终端 N」。
+            if (item.index > seqRef.current) seqRef.current = item.index
+            return {
+              id: item.leafId,
+              title: `终端 ${item.index || ++seqRef.current}`,
+              state: 'active' as const,
+              owned: item.owned,
+              cols: item.cols,
+              rows: item.rows
+            }
+          })
         if (added.length === 0) return prev
         setActiveId((current) => current ?? added[0].id)
         return [...prev, ...added]
@@ -87,13 +98,14 @@ export default function App(): React.JSX.Element {
     })
 
     // 被控端上已有会话（另一个客户端开的）：不新建，直接挂上去镜像同一块终端。
-    const offAdopted = window.rpty.onAdopted(({ leafId }) => {
+    const offAdopted = window.rpty.onAdopted(({ leafId, owned, index, cols, rows }) => {
       setSessions((prev) => {
         if (prev.some((item) => item.id === leafId)) return prev
         autoCreatedRef.current = true
-        const title = `终端 ${++seqRef.current}`
+        if (index > seqRef.current) seqRef.current = index
+        const title = `终端 ${index || ++seqRef.current}`
         setActiveId((current) => current ?? leafId)
-        return [...prev, { id: leafId, title, state: 'active' }]
+        return [...prev, { id: leafId, title, state: 'active', owned, cols, rows }]
       })
     })
 
@@ -134,7 +146,10 @@ export default function App(): React.JSX.Element {
     const title = `终端 ${++seqRef.current}`
     // 先乐观插标签再发请求：连点两下会立刻出现两个标签，
     // 各自走自己的 IPC，不会因为上一发还没回来就被吃掉。
-    setSessions((prev) => [...prev, { id: leafId, title, state: 'connecting' }])
+    setSessions((prev) => [
+      ...prev,
+      { id: leafId, title, state: 'connecting', owned: true }
+    ])
     setActiveId(leafId)
     const result = await window.rpty.create({ leafId, cols, rows })
     if (!result.ok) {
@@ -314,6 +329,11 @@ export default function App(): React.JSX.Element {
               leafId={session.id}
               active={session.id === activeId}
               readOnly={readOnly}
+              sizeLock={
+                !session.owned && session.cols && session.rows
+                  ? { cols: session.cols, rows: session.rows }
+                  : undefined
+              }
             />
           ))}
 

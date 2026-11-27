@@ -69,6 +69,8 @@ class Session:
     ) -> None:
         self.sid = sid
         self.token = token
+        # 被控机上的全局序号，用来让所有客户端显示同一个「终端 N」
+        self.index = 0
         self.cols = cols
         self.rows = rows
         self.shell = shell
@@ -246,6 +248,8 @@ class Agent:
         self.tasks: Dict[str, asyncio.Task] = {}
         self.ws: Optional[Any] = None
         self.backoff = 1.0
+        # 所有客户端共用一套编号：谁建的都按这个序号显示，两端标签才对得上。
+        self.seq = 0
 
     @property
     def signal_url(self) -> str:
@@ -301,6 +305,7 @@ class Agent:
                     "data_token": s.token,
                     "cols": s.cols,
                     "rows": s.rows,
+                    "index": s.index,
                 }
                 for s in self.sessions.values()
                 if not s.closed
@@ -436,6 +441,8 @@ class Agent:
             await self.reply({"type": "ERROR", "code": "pty_failed", "message": str(exc)})
             return
 
+        self.seq += 1
+        session.index = self.seq
         self.sessions[sid] = session
         task = asyncio.create_task(session.run_data(self.data_url(data_token), self.reply))
         self.tasks[sid] = task

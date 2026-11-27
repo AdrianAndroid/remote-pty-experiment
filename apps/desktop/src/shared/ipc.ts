@@ -100,6 +100,10 @@ export interface SessionAdoptedPayload {
   sessionId: string
   cols: number
   rows: number
+  /** true = 这个 PTY 是本窗口建的；false = 别的窗口建的，这里只是镜像 */
+  owned: boolean
+  /** 被控机上的全局序号，两端标签靠它对齐 */
+  index: number
 }
 
 export interface SessionExitPayload {

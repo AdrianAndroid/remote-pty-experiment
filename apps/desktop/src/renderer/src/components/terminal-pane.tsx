@@ -22,12 +22,18 @@ interface TerminalPaneProps {
   active: boolean
   /** 只读：画面照常刷新，但键盘输入被吃掉，不发给被控端 */
   readOnly?: boolean
+  /**
+   * 镜像端专用：把 xterm 锁到 PTY 的 cols/rows。
+   * 不锁的话本地 fit 会按窗口宽度重排，而 PTY 仍按老宽度换行，画面就会错行。
+   */
+  sizeLock?: { cols: number; rows: number }
 }
 
 export function TerminalPane({
   leafId,
   active,
-  readOnly = false
+  readOnly = false,
+  sizeLock
 }: TerminalPaneProps): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -65,6 +71,22 @@ export function TerminalPane({
     }
   }, [])
 
+  const applyFit = useCallback(() => {
+    const term = termRef.current
+    const fit = fitRef.current
+    if (!term || !fit) return
+    try {
+      fit.fit()
+    } catch {
+      // 容器还没量到尺寸，等 ResizeObserver 再来一次。
+      return
+    }
+    if (sizeLock && (term.cols !== sizeLock.cols || term.rows !== sizeLock.rows)) {
+      // 拉回 PTY 的真实尺寸：宁可右侧留白，也不能让换行位置和 shell 不一致。
+      term.resize(sizeLock.cols, sizeLock.rows)
+    }
+  }, [sizeLock])
+
   // 创建实例，只在 leafId 变化时重建。
   useEffect(() => {
     const host = hostRef.current
@@ -96,6 +118,9 @@ export function TerminalPane({
 
     try {
       fit.fit()
+      if (sizeLock && (term.cols !== sizeLock.cols || term.rows !== sizeLock.rows)) {
+        term.resize(sizeLock.cols, sizeLock.rows)
+      }
     } catch {
       // 容器刚挂载，量不到尺寸，等 ResizeObserver 兜底。
     }
@@ -109,11 +134,7 @@ export function TerminalPane({
 
     const observer = new ResizeObserver(() => {
       if (!active) return
-      try {
-        fit.fit()
-      } catch {
-        // ignore
-      }
+      applyFit()
     })
     observer.observe(host)
 
@@ -150,16 +171,12 @@ export function TerminalPane({
     }
 
     const raf = requestAnimationFrame(() => {
-      try {
-        fitRef.current?.fit()
-      } catch {
-        // ignore
-      }
+      applyFit()
       attachWebgl()
-      termRef.current?.focus()
+      if (!readOnly) termRef.current?.focus()
     })
     return () => cancelAnimationFrame(raf)
-  }, [active, attachWebgl, detachWebgl])
+  }, [active, attachWebgl, detachWebgl, applyFit, readOnly])
 
   return (
     <div

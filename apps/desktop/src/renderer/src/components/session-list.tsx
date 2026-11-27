@@ -12,6 +12,11 @@ export interface SessionMeta {
   id: string
   title: string
   state: SessionState
+  /** true = 本窗口建的终端；false = 别的窗口建的，这里只是镜像 */
+  owned: boolean
+  /** PTY 语言尺寸，镜像端据此锁死 xterm，避免换行错位 */
+  cols?: number
+  rows?: number
 }
 
 interface SessionListProps {
@@ -100,12 +105,24 @@ export function SessionList({
                 const next = window.prompt('重命名标签', session.title)
                 if (next && next.trim()) onRename(session.id, next.trim())
               }}
-              title={`${session.title} · ${STATE_LABEL[session.state]}${
-                index < 9 ? ` · ⌘${index + 1}` : ''
-              }`}
+              title={`${session.title} · ${session.owned ? '本窗口创建' : '镜像自另一个窗口'} · ${
+                STATE_LABEL[session.state]
+              }${index < 9 ? ` · ⌘${index + 1}` : ''}`}
             >
               <span className={`led led--${session.state}`} />
-              {!collapsed && <span className="tab__title">{session.title}</span>}
+              {!collapsed && (
+                <span className={session.owned ? 'tab__title' : 'tab__title tab__title--mirror'}>
+                  {session.title}
+                </span>
+              )}
+              {!collapsed && !session.owned && (
+                <span
+                  className="tab__badge"
+                  title="这个终端是另一个窗口创建的，你在镜像查看同一个 shell"
+                >
+                  共享
+                </span>
+              )}
               {!collapsed && (
                 <span
                   className="tab__close"
