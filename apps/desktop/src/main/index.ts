@@ -231,6 +231,11 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
+  // 开发时跑的是 electron 本体，Dock 里会是 Electron 的默认图标；
+  // 显式换成本项目的图标，打包后则由 build/icon.icns 接管。
+  if (process.platform === 'darwin' && app.dock) {
+    app.dock.setIcon(join(__dirname, '../../build/icon.png'))
+  }
   registerIpc()
   buildMenu()
   createWindow()
