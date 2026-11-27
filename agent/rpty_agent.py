@@ -57,12 +57,21 @@ def clamp(value: Any, lo: int, hi: int, default: int) -> int:
 class Session:
     """一个真实 PTY 会话。"""
 
-    def __init__(self, sid: str, token: str, cols: int, rows: int, shell: str) -> None:
+    def __init__(
+        self,
+        sid: str,
+        token: str,
+        cols: int,
+        rows: int,
+        shell: str,
+        on_finish=None,
+    ) -> None:
         self.sid = sid
         self.token = token
         self.cols = cols
         self.rows = rows
         self.shell = shell
+        self.on_finish = on_finish
 
         self.loop = asyncio.get_running_loop()
         self.queue: asyncio.Queue[bytes] = asyncio.Queue()
@@ -215,6 +224,12 @@ class Session:
         except OSError:
             pass
 
+        if self.on_finish is not None:
+            try:
+                self.on_finish(self.sid)
+            except Exception:  # noqa: BLE001
+                LOG.debug("on_finish 回调失败", exc_info=True)
+
     def close(self) -> None:
         self._finish("closed")
 
@@ -260,26 +275,7 @@ class Agent:
             LOG.info("已连上 relay %s", self.relay)
 
             # 告知当前已有会话，便于控制端重建标签。
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "SESSION_LIST",
-                        "hostname": self.hostname,
-                        "platform": sys.platform,
-                        "sessions": [
-                            {
-                                "session_id": s.sid,
-                                "data_token": s.token,
-                                "cols": s.cols,
-                                "rows": s.rows,
-                            }
-                            for s in self.sessions.values()
-                            if not s.closed
-                        ],
-                    },
-                    ensure_ascii=False,
-                )
-            )
+            await self.send_session_list()
 
             async for raw in ws:
                 try:
@@ -287,6 +283,29 @@ class Agent:
                 except (TypeError, ValueError):
                     continue
                 await self.dispatch(message)
+
+    async def send_session_list(self) -> None:
+        if self.ws is None:
+            return
+        payload = {
+            "type": "SESSION_LIST",
+            "hostname": self.hostname,
+            "platform": sys.platform,
+            "sessions": [
+                {
+                    "session_id": s.sid,
+                    "data_token": s.token,
+                    "cols": s.cols,
+                    "rows": s.rows,
+                }
+                for s in self.sessions.values()
+                if not s.closed
+            ],
+        }
+        try:
+            await self.ws.send(json.dumps(payload, ensure_ascii=False))
+        except ConnectionClosed:
+            pass
 
     async def dispatch(self, message: Dict[str, Any]) -> None:
         kind = message.get("type")
@@ -304,6 +323,9 @@ class Agent:
                 session.resize(message.get("cols"), message.get("rows"))
         elif kind == "CTL_ONLINE":
             LOG.info("控制端已上线")
+            # 控制端刚连上时收不到之前发的 SESSION_LIST，这里补一份，
+            # 否则客户端拿不到 hostname，也没法判断哪些会话还活着。
+            await self.send_session_list()
         elif kind == "PING":
             await self.reply({"type": "PONG", "at": int(time.time())})
         else:
@@ -329,8 +351,31 @@ class Agent:
             return
 
         if sid in self.sessions:
-            await self.reply({"type": "ERROR", "code": "duplicate", "message": "会话已存在"})
-            return
+            existing = self.sessions[sid]
+            if not existing.closed:
+                # 幂等：控制端重连时会用同一个 session_id 再要一次。
+                # 这里绝不能新建 PTY，只确认并保证数据通道还在。
+                task = self.tasks.get(sid)
+                if task is None or task.done():
+                    self.tasks[sid] = asyncio.create_task(
+                        existing.run_data(self.data_url(existing.token))
+                    )
+                LOG.info("会话 %s 已存在，按重连处理", sid[:8])
+                await self.reply(
+                    {
+                        "type": "SESSION_CREATED",
+                        "session_id": sid,
+                        "data_token": existing.token,
+                        "pid": existing.pid,
+                        "title": "reconnect",
+                    }
+                )
+                return
+            # 已退出的旧会话，清掉重开。
+            self.sessions.pop(sid, None)
+            old_task = self.tasks.pop(sid, None)
+            if old_task is not None:
+                old_task.cancel()
 
         if len([s for s in self.sessions.values() if not s.closed]) >= 32:
             await self.reply({"type": "ERROR", "code": "too_many", "message": "会话数超过上限"})
@@ -341,7 +386,9 @@ class Agent:
         rows = clamp(message.get("rows"), 2, 500, 24)
 
         try:
-            session = Session(sid, data_token, cols, rows, shell)
+            session = Session(
+                sid, data_token, cols, rows, shell, on_finish=self.drop_session
+            )
         except Exception as exc:  # noqa: BLE001
             LOG.exception("创建 PTY 失败")
             await self.reply({"type": "ERROR", "code": "pty_failed", "message": str(exc)})
@@ -360,6 +407,13 @@ class Agent:
                 "title": os.path.basename(shell),
             }
         )
+
+    def drop_session(self, sid: str) -> None:
+        """PTY 自己退出后清表，避免 sessions 里堆一堆死会话。"""
+        self.sessions.pop(sid, None)
+        task = self.tasks.pop(sid, None)
+        if task is not None:
+            task.cancel()
 
     def on_close(self, sid: str) -> None:
         session = self.sessions.pop(sid, None)

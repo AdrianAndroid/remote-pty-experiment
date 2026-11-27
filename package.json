@@ -10,7 +10,6 @@
     "dev": "pnpm --filter rpty-desktop dev",
     "build": "pnpm --filter rpty-desktop build",
     "preview": "pnpm --filter rpty-desktop preview",
-    "typecheck": "pnpm --filter rpty-desktop typecheck",
-    "rebuild": "pnpm --filter rpty-desktop rebuild"
+    "typecheck": "pnpm --filter rpty-desktop typecheck"
   }
 }
