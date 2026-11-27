@@ -25,6 +25,7 @@ function subscribe<T>(channel: string): (handler: (payload: T) => void) => () =>
 const bridge: RptyBridge = {
   connect: (config: RelayConfig) => ipcRenderer.invoke(IpcChannel.RelayConnect, config),
   disconnect: () => ipcRenderer.invoke(IpcChannel.RelayDisconnect),
+  reconnect: () => ipcRenderer.invoke(IpcChannel.RelayReconnect),
   getStatus: () => ipcRenderer.invoke(IpcChannel.RelayStatus),
   getConfigInfo: (): Promise<ConfigInfo> => ipcRenderer.invoke(IpcChannel.ConfigInfo),
 

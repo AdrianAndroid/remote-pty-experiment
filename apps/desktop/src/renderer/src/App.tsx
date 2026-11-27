@@ -34,6 +34,8 @@ export default function App(): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [readOnly, setReadOnly] = useState(false)
   const [error, setError] = useState('')
+  /** 手动断开过：连接页要显示「已断开 + 重新连接」，而不是首次配置的样子 */
+  const [detached, setDetached] = useState(false)
   /** 多台机器在线时，新建终端要先问一句开在哪台 */
   const [picker, setPicker] = useState<NodeInfo[] | null>(null)
 
@@ -154,6 +156,62 @@ export default function App(): React.JSX.Element {
       offResized()
       offError()
       offReadOnly()
+    }
+  }, [])
+
+  // ---------------------------------------------------------- 连接
+
+  const handleConnect = useCallback(async (url: string, token: string) => {
+    setBusy(true)
+    setError('')
+    try {
+      const next = await window.rpty.connect({ url, token })
+      setStatus(next)
+      if (next.phase === 'error') setError(next.message ?? '连接失败')
+      else {
+        setDetached(false)
+        void window.rpty.getConfigInfo().then(setConfig)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  /**
+   * 断开连接：只断这台客户端到 relay 的链路，宿主上的 PTY 一个都不动。
+   *
+   * 标签必须清掉 —— 重连后会话会重新以 adopt 的方式回来，留着旧标签就会重复。
+   */
+  const handleDisconnect = useCallback(async () => {
+    setError('')
+    try {
+      await window.rpty.disconnect()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSessions([])
+      setActiveId(null)
+      setStatus({ phase: 'idle', agentOnline: false })
+      autoCreatedRef.current = false
+      setDetached(true)
+    }
+  }, [])
+
+  /** 重连：地址与 token 都在主进程里，这里不需要用户再输一次。 */
+  const handleReconnect = useCallback(async () => {
+    setBusy(true)
+    setError('')
+    try {
+      const next = await window.rpty.reconnect()
+      setStatus(next)
+      if (next.phase === 'error') setError(next.message ?? '重连失败')
+      else setDetached(false)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
     }
   }, [])
 
@@ -284,12 +342,15 @@ export default function App(): React.JSX.Element {
         case 'toggle-readonly':
           void toggleReadOnly()
           break
+        case 'disconnect':
+          void handleDisconnect()
+          break
         default:
           break
       }
     })
     return offMenu
-  }, [requestCreate, createSession, closeSession, stepTab, gotoTab, toggleReadOnly])
+  }, [requestCreate, createSession, closeSession, stepTab, gotoTab, toggleReadOnly, handleDisconnect])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -306,23 +367,6 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKeyDown, true)
   }, [gotoTab])
 
-  // ---------------------------------------------------------- 连接
-
-  const handleConnect = useCallback(async (url: string, token: string) => {
-    setBusy(true)
-    setError('')
-    try {
-      const next = await window.rpty.connect({ url, token })
-      setStatus(next)
-      if (next.phase === 'error') setError(next.message ?? '连接失败')
-      else void window.rpty.getConfigInfo().then(setConfig)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }, [])
-
   // ---------------------------------------------------------- 渲染
 
   const online = status.phase === 'online'
@@ -335,7 +379,9 @@ export default function App(): React.JSX.Element {
         hasToken={config.hasToken}
         busy={busy}
         error={error}
+        detached={detached}
         onConnect={(url, token) => void handleConnect(url, token)}
+        onReconnect={() => void handleReconnect()}
       />
     )
   }
@@ -364,6 +410,7 @@ export default function App(): React.JSX.Element {
         onRename={renameSession}
         onToggle={() => setCollapsed((value) => !value)}
         onToggleReadOnly={() => void toggleReadOnly()}
+        onDisconnect={() => void handleDisconnect()}
       />
 
       <main className="stage">

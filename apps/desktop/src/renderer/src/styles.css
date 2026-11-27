@@ -464,6 +464,28 @@ code {
   text-align: center;
 }
 
+/* 手动断开回来的那屏：比首次配置更安静，只有一枚「重新连接」 */
+.connect__standby {
+  margin: 2px 0 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.connect__link {
+  margin-top: 10px;
+  padding: 4px;
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.connect__link:hover {
+  color: var(--accent);
+}
+
 .field {
   display: block;
   margin-bottom: 13px;
@@ -595,6 +617,23 @@ code {
 .modebtn--readonly .modebtn__dot {
   background: #f0b429;
   box-shadow: 0 0 6px #f0b42966;
+}
+
+/* 断开连接：常驻在侧栏底部，跟「可操作 / 只读」并排 */
+.modebtn--disconnect {
+  margin-bottom: 4px;
+  color: var(--text-faint);
+}
+
+.modebtn--disconnect:hover {
+  background: #241618;
+  color: var(--red);
+}
+
+.modebtn--disconnect .modebtn__dot {
+  background: var(--red);
+  box-shadow: none;
+  opacity: 0.75;
 }
 
 /* 只读时终端右上角挂一条提示，肉眼一眼能看出「这窗口不能敲」 */

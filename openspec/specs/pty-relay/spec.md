@@ -177,3 +177,29 @@ agent SHALL 在未设置 `AUTHORIZED=1` 时拒绝启动。
 #### Scenario: 行列与 PTY 不一致
 - **WHEN** 客户端的行列和 PTY 不一致
 - **THEN** 全屏 TUI（如 claude、vim）仍然逐行对齐，不出现文字重叠或内容串行
+
+### Requirement: 连接可主动断开并可恢复
+
+控制端 SHALL 提供断开与 relay 的连接的入口，且断开后 SHALL 能重建连接而不必重新输入地址与 token。
+
+断开 SHALL NOT 影响被控端上的 PTY 进程，也 SHALL NOT 影响其它控制端。
+
+#### Scenario: 侧栏断开
+- **WHEN** 用户点击侧栏底部的「断开连接」（或按 ⌘⇧D）
+- **THEN** 客户端关闭 ctl 与全部数据通道，不自动重连，界面回到连接页并显示「已断开」
+
+#### Scenario: 断开不影响 PTY
+- **WHEN** 断开连接
+- **THEN** 宿主机上的 shell 进程 pid 不变、输出继续产生，其它控制端画面不受影响
+
+#### Scenario: 重新连接
+- **WHEN** 用户在「已断开」页面点击「重新连接」
+- **THEN** 用已保存的地址与 token 重连成功，宿主上仍在运行的会话以镜像方式回到标签列，标签不重复
+
+#### Scenario: 重连后归属不变
+- **WHEN** 创建端断开后再重连
+- **THEN** 它创建的会话仍然没有「共享」标记，归属按 `client-id` 认领回来
+
+#### Scenario: 断开期间会话变化
+- **WHEN** 断开期间宿主上新增或被 kill 掉会话
+- **THEN** 重连后的列表反映宿主当前状态（新增的出现，被 kill 的不出现）

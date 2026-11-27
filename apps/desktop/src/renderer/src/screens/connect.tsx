@@ -1,17 +1,22 @@
 /**
- * 连接页：第一次用，或者 relay 连不上时停在这里。
+ * 连接页：第一次用、连不上，或者手动断开之后停在这里。
  *
  * token 由主进程保存，不回传渲染层，所以这里留空表示「沿用已保存的」。
+ * 手动断开过（detached）时走简化视图：一个「重新连接」按钮，地址与 token 都沿用，
+ * 不想改配置的人不用再看一遍表单。
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 interface ConnectScreenProps {
   initialUrl: string
   hasToken: boolean
   busy: boolean
   error: string
+  /** 是「手动断开」回来的，不是首次配置 / 连不上 */
+  detached?: boolean
   onConnect: (url: string, token: string) => void
+  onReconnect?: () => void
 }
 
 export function ConnectScreen({
@@ -19,12 +24,56 @@ export function ConnectScreen({
   hasToken,
   busy,
   error,
-  onConnect
+  detached = false,
+  onConnect,
+  onReconnect
 }: ConnectScreenProps): React.JSX.Element {
   const [url, setUrl] = useState(initialUrl)
   const [token, setToken] = useState('')
+  const [showForm, setShowForm] = useState(!detached)
+
+  useEffect(() => {
+    setUrl(initialUrl)
+  }, [initialUrl])
+
+  useEffect(() => {
+    if (detached) setShowForm(false)
+  }, [detached])
 
   const canSubmit = url.trim().length > 0 && (token.trim().length > 0 || hasToken) && !busy
+
+  if (detached && !showForm) {
+    return (
+      <div className="connect">
+        <div className="connect__card">
+          <div className="connect__logo">▚ rpty</div>
+          <p className="connect__standby">已断开与 relay 的连接</p>
+          <p className="connect__hint">
+            宿主机上的终端还在跑，重连后会原样回来 —— 断开只是这台机器不再收画面。
+          </p>
+
+          {error && <div className="connect__error">{error}</div>}
+
+          <button
+            type="button"
+            className="btn btn--primary"
+            disabled={busy}
+            onClick={() => onReconnect?.()}
+          >
+            {busy ? '重新连接中…' : '重新连接'}
+          </button>
+
+          <button type="button" className="connect__link" onClick={() => setShowForm(true)}>
+            修改地址或 token
+          </button>
+
+          <p className="connect__foot">
+            当前地址 <code>{url || '未保存'}</code>
+          </p>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="connect">
@@ -74,8 +123,14 @@ export function ConnectScreen({
           disabled={!canSubmit}
           onClick={() => onConnect(url.trim(), token.trim())}
         >
-          {busy ? '连接中…' : '连接'}
+          {busy ? '连接中…' : detached ? '重新连接' : '连接'}
         </button>
+
+        {detached && (
+          <button type="button" className="connect__link" onClick={() => setShowForm(false)}>
+            返回
+          </button>
+        )}
 
         <p className="connect__foot">
           被控端需要先跑起 <code>rpty_agent.py</code>

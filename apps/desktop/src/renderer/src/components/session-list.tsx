@@ -35,6 +35,8 @@ interface SessionListProps {
   onRename: (id: string, title: string) => void
   onToggle: () => void
   onToggleReadOnly: () => void
+  /** 断开整台客户端到 relay 的链路（宿主上的 PTY 不动，可以再连回来） */
+  onDisconnect: () => void
 }
 
 const STATE_LABEL: Record<SessionState, string> = {
@@ -58,7 +60,8 @@ export function SessionList({
   onClose,
   onRename,
   onToggle,
-  onToggleReadOnly
+  onToggleReadOnly,
+  onDisconnect
 }: SessionListProps): React.JSX.Element {
   const online = phase === 'online' && agentOnline
 
@@ -180,6 +183,17 @@ export function SessionList({
         <span className="modebtn__dot" />
         {!collapsed && <span>{readOnly ? '只读' : '可操作'}</span>}
         {!collapsed && <kbd>⌘⇧L</kbd>}
+      </button>
+
+      <button
+        type="button"
+        className="modebtn modebtn--disconnect"
+        onClick={onDisconnect}
+        title="断开与 relay 的连接（⌘⇧D）· 宿主上的终端会继续跑，随时可以再连回来"
+      >
+        <span className="modebtn__dot" />
+        {!collapsed && <span>断开连接</span>}
+        {!collapsed && <kbd>⌘⇧D</kbd>}
       </button>
 
       {!collapsed && (

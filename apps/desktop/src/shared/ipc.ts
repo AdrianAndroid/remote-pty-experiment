@@ -13,6 +13,8 @@ export const IpcChannel = {
   RelayConnect: 'relay:connect',
   /** 渲染 -> 主：断开 */
   RelayDisconnect: 'relay:disconnect',
+  /** 渲染 -> 主：用已保存的地址与 token 重连（断开之后回来） */
+  RelayReconnect: 'relay:reconnect',
   /** 渲染 -> 主：连接状态查询 */
   RelayStatus: 'relay:status',
   /** 渲染 -> 主：读取已保存的地址与「是否有 token」 */
@@ -52,7 +54,7 @@ export const IpcChannel = {
   MenuCommand: 'menu:command'
 } as const
 
-export type MenuCommand = 'new-tab' | 'close-tab' | 'next-tab' | 'prev-tab' | 'goto-tab' | 'toggle-sidebar' | 'toggle-readonly'
+export type MenuCommand = 'new-tab' | 'close-tab' | 'next-tab' | 'prev-tab' | 'goto-tab' | 'toggle-sidebar' | 'toggle-readonly' | 'disconnect'
 
 export interface ConfigInfo {
   url: string
@@ -152,6 +154,8 @@ export interface RelayErrorPayload {
 export interface RptyBridge {
   connect(config: RelayConfig): Promise<RelayStatus>
   disconnect(): Promise<void>
+  /** 断开之后回来：用保存的地址与 token 重连，不需要重新输入 */
+  reconnect(): Promise<RelayStatus>
   getStatus(): Promise<RelayStatus>
   getConfigInfo(): Promise<ConfigInfo>
 

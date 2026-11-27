@@ -124,6 +124,12 @@ function buildMenu(): void {
           label: '只读模式（只看不动）',
           accelerator: 'CmdOrCtrl+Shift+L',
           click: () => sendMenu('toggle-readonly')
+        },
+        { type: 'separator' },
+        {
+          label: '断开连接（可再连回）',
+          accelerator: 'CmdOrCtrl+Shift+D',
+          click: () => sendMenu('disconnect')
         }
       ]
     },
@@ -184,6 +190,26 @@ function registerIpc(): void {
 
   ipcMain.handle(IpcChannel.RelayDisconnect, async () => {
     await relay.disconnect()
+  })
+
+  // 断开之后回来：地址和 token 都在主进程手里，渲染层不需要再问用户要一遍。
+  ipcMain.handle(IpcChannel.RelayReconnect, async () => {
+    const saved = loadConfig()
+    const url = (saved.url ?? '').trim()
+    const token = (saved.token ?? '').trim()
+    if (!url || !token) {
+      return { phase: 'error', agentOnline: false, message: '还没有保存 relay 地址与 token' }
+    }
+    try {
+      // 走 connect：它内部会先关掉旧 ctl（幂等），并顺带刷新保存的配置。
+      return await relay.connect({ url, token })
+    } catch (error) {
+      return {
+        phase: 'error',
+        agentOnline: false,
+        message: error instanceof Error ? error.message : String(error)
+      }
+    }
   })
 
   ipcMain.handle(IpcChannel.RelayStatus, () => relay.status)

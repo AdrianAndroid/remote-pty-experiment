@@ -187,17 +187,41 @@ export class RelayClient {
     return this.status
   }
 
+  /**
+   * 主动断开：这是「整台客户端退出链路」，不是 kill 也不是单块终端的 detach。
+   *
+   * 宿主上的 PTY 一个都不动，只是这边不再收不发。所以本地状态要**清干净**，
+   * 否则重连时旧 leafId、旧字节缓冲、旧节点定时器会和 relay 新推的列表打架。
+   */
   async disconnect(): Promise<void> {
     this.manualClose = true
     this.clearReconnect()
+    this.clearResync()
+    for (const timer of this.nodeGoneTimers.values()) clearTimeout(timer)
+    this.nodeGoneTimers.clear()
     for (const session of this.sessions.values()) {
       this.closeData(session)
       this.handlers.onState(session.leafId, 'disconnected')
     }
     this.sessions.clear()
     this.bySessionId.clear()
+    this.readyLeaves.clear()
+    this.buffered.clear()
+    this.pendingReady.clear()
+    this.indexLeaves.clear()
+    this.detached.clear()
+    this.hostname = ''
+    this.nodes = []
+    this.agentOnline = false
     this.closeCtl()
     this.setStatus('idle')
+  }
+
+  /** 断开之后回来：用上次保存的地址与 token 重连，用户不用重新输。 */
+  async reconnect(): Promise<RelayStatus> {
+    if (!this.config?.url || !this.config?.token) throw new Error('还没有可用的 relay 地址')
+    this.backoff = 600
+    return this.connect(this.config)
   }
 
   private closeCtl(): void {
@@ -438,6 +462,13 @@ export class RelayClient {
 
       default:
         break
+    }
+  }
+
+  private clearResync(): void {
+    if (this.resyncTimer) {
+      clearTimeout(this.resyncTimer)
+      this.resyncTimer = null
     }
   }
 
