@@ -1,0 +1,20 @@
+services:
+  relay:
+    build: .
+    image: rpty-relay:1.0.0
+    container_name: rpty-relay
+    restart: always
+    # host 网络让 127.0.0.1:8765 直接落在宿主机回环上，
+    # 同机的 1Panel-openresty 无需任何额外配置即可反代。
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      RPty_HOST: 127.0.0.1
+      RPty_PORT: "8765"
+      RPty_LOG_LEVEL: INFO
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
