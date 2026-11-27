@@ -42,8 +42,10 @@ interface SessionListProps {
   onRename: (id: string, title: string) => void
   onToggle: () => void
   onToggleReadOnly: () => void
-  /** 断开整台客户端到 relay 的链路（宿主上的 PTY 不动，可以再连回来） */
+  /** 离开这个客户端（撤画面回列表），不是断中继 */
   onDisconnect: () => void
+  /** 配对上的对方客户端名（relay 确认后才显示「已配对」） */
+  pairedWith?: string
   /** 返回在线客户端列表（只撤画面，对方宿主上的 PTY 不动） */
   onBack?: () => void
   backLabel?: string
@@ -72,6 +74,7 @@ export function SessionList({
   onToggle,
   onToggleReadOnly,
   onDisconnect,
+  pairedWith,
   onBack,
   backLabel = '客户端'
 }: SessionListProps): React.JSX.Element {
@@ -97,6 +100,11 @@ export function SessionList({
                   <>
                     <span className="sidebar__role">客户端</span>
                     {(hostname || '已连接').replace(/\.local$/, '')}
+                    {pairedWith && (
+                      <span className="sidebar__paired" title={`已配对：${pairedWith}`}>
+                        已配对
+                      </span>
+                    )}
                   </>
                 ) : phase === 'connecting' ? (
                   '连接中…'
@@ -214,10 +222,10 @@ export function SessionList({
         type="button"
         className="modebtn modebtn--disconnect"
         onClick={onDisconnect}
-        title="断开中继（⌘⇧D）· 只断这条 WSS；对方宿主上的终端继续跑，随时可以再连回来"
+        title="离开这个客户端，回到在线列表（⌘⇧D）· 只是撤掉画面，对方机器上的终端继续跑"
       >
         <span className="modebtn__dot" />
-        {!collapsed && <span>断开中继</span>}
+        {!collapsed && <span>离开</span>}
         {!collapsed && <kbd>⌘⇧D</kbd>}
       </button>
 

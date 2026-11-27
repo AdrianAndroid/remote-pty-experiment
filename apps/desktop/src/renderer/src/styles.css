@@ -1069,3 +1069,22 @@ code {
   background: rgba(90, 155, 255, 0.16);
   color: #7fb0ff;
 }
+
+/* 配对：谁正进着我的客户端 / 我正在进的是谁 */
+.devicecard__pair {
+  display: block;
+  margin-top: 2px;
+  color: #6ea8fe;
+  font-style: normal;
+}
+
+.sidebar__paired {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(110, 168, 254, 0.18);
+  color: #6ea8fe;
+  font-size: 10px;
+  line-height: 15px;
+  vertical-align: 1px;
+}

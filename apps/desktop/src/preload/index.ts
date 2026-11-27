@@ -27,7 +27,8 @@ const bridge: RptyBridge = {
   disconnect: () => ipcRenderer.invoke(IpcChannel.RelayDisconnect),
   reconnect: () => ipcRenderer.invoke(IpcChannel.RelayReconnect),
   getStatus: () => ipcRenderer.invoke(IpcChannel.RelayStatus),
-  activateNode: (node: string | null) => ipcRenderer.invoke(IpcChannel.NodeActivate, node),
+  activateNode: (node: string | null, client?: string | null) =>
+    ipcRenderer.invoke(IpcChannel.NodeActivate, { node, client: client ?? null }),
   getConfigInfo: (): Promise<ConfigInfo> => ipcRenderer.invoke(IpcChannel.ConfigInfo),
 
   create: (options: SessionCreateOptions): Promise<SessionCreateResult> =>

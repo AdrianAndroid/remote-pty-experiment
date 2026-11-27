@@ -92,6 +92,10 @@ export default function App(): React.JSX.Element {
   const [activeNode, setActiveNode] = useState<string | null>(null)
   /** 我进的是哪个客户端（同机多客户端时，宿主 node 可能一样，名字要按客户端算） */
   const [activeClientId, setActiveClientId] = useState<string | null>(null)
+  /** leaveDevice 的 ref：键盘菜单回调注册在它定义之前 */
+  const leaveDeviceRef = useRef<() => Promise<void>>(async () => {})
+  /** client id -> 名字快照：对方掉线后名字没了，提示里还得能叫出它 */
+  const clientNamesRef = useRef<Record<string, string>>({})
   /** 多台机器在线时，新建终端要先问一句开在哪台 */
 
   /**
@@ -522,14 +526,24 @@ export default function App(): React.JSX.Element {
           if (activeNodeRef.current) void leaveDevice()
           break
         case 'disconnect':
-          void handleDisconnect()
+          // 在别人客户端里按 ⌘⇧D = 离开（回列表）；停在列表上才是断中继。
+          if (activeNodeRef.current) void leaveDeviceRef.current()
+          else void handleDisconnect()
           break
         default:
           break
       }
     })
     return offMenu
-  }, [requestCreate, createSession, closeSession, stepTab, gotoTab, toggleReadOnly, handleDisconnect])
+  }, [
+    requestCreate,
+    createSession,
+    closeSession,
+    stepTab,
+    gotoTab,
+    toggleReadOnly,
+    handleDisconnect
+  ])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -564,7 +578,7 @@ export default function App(): React.JSX.Element {
       // 那时 useState 还没生效，靠 ref 才知道这是哪台设备（否则标题/顺序对不上）。
       activeNodeRef.current = node
       pendingActiveRef.current = readTabStore()[node]?.active ?? null
-      await window.rpty.activateNode(node)
+      await window.rpty.activateNode(node, clientId)
       setActiveNode(node)
       const list = await window.rpty.snapshotSessions()
       applySnapshot(list)
@@ -575,7 +589,7 @@ export default function App(): React.JSX.Element {
   /** 离开设备：撤画面、不动 PTY。列表页继续抱着中继连接。 */
   const leaveDevice = useCallback(async () => {
     activeNodeRef.current = null
-    await window.rpty.activateNode(null)
+    await window.rpty.activateNode(null, null)
     setActiveNode(null)
     setActiveClientId(null)
     setSessions([])
@@ -583,6 +597,32 @@ export default function App(): React.JSX.Element {
     autoCreatedRef.current = false
     setError('')
   }, [])
+
+  useEffect(() => {
+    leaveDeviceRef.current = leaveDevice
+  }, [leaveDevice])
+
+  useEffect(() => {
+    for (const item of status.clients ?? []) clientNamesRef.current[item.client] = item.name || ''
+  }, [status.clients])
+
+  /**
+   * 我进的那个客户端没了（对方点「断开中继」或关了窗口）→ 自动回列表。
+   *
+   * 不能卡在一个已经不存在的客户端上：那样顶部只能拿节点名硬凑一个名字，
+   * 看起来就像"我自己"。
+   */
+  useEffect(() => {
+    if (!activeClientId || status.phase !== 'online') return
+    const list = status.clients ?? []
+    if (list.length === 0) return
+    if (list.some((item) => item.client === activeClientId)) return
+    const name = clientNamesRef.current[activeClientId] || ''
+    // leaveDevice 自己会清 error，所以提示要等它清完再写
+    void leaveDevice().then(() =>
+      setError(name ? `「${name}」已断开中继 · 已回到在线列表` : '对方客户端已断开中继 · 已回到在线列表')
+    )
+  }, [status.clients, status.phase, activeClientId, leaveDevice])
 
   // ---------------------------------------------------------- 渲染
 
@@ -594,6 +634,7 @@ export default function App(): React.JSX.Element {
       <DevicesScreen
         clients={status.clients ?? []}
         selfClientId={status.clientId}
+        pairs={status.pairs ?? []}
         online={online}
         busy={busy}
         error={error}
@@ -612,6 +653,11 @@ export default function App(): React.JSX.Element {
     (status.clients ?? []).find((item) => item.client === activeClientId) ??
     (status.clients ?? []).find((item) => item.host === activeNode && item.client !== status.clientId)
   const deviceName = activeClient?.name ?? (activeDevice ? deviceLabel(activeDevice) : (activeNode ?? ''))
+  // relay 那边确认了配对才显示「已配对」—— 自己点进列表不算数
+  const pairedWith =
+    (status.pairs ?? []).find(
+      (pair) => pair.from === status.clientId && pair.to === activeClientId
+    )?.to_name ?? ''
 
   if (detached || !showWorkspace) {
     return (
@@ -653,9 +699,10 @@ export default function App(): React.JSX.Element {
         onRename={renameSession}
         onToggle={() => setCollapsed((value) => !value)}
         onToggleReadOnly={() => void toggleReadOnly()}
-        onDisconnect={() => void handleDisconnect()}
+        onDisconnect={() => void leaveDevice()}
         onBack={() => void leaveDevice()}
         backLabel="客户端"
+        pairedWith={pairedWith}
       />
 
       <main className="stage">

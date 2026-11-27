@@ -9,12 +9,14 @@
  * 进别人的客户端才是真正的连接：那条数据通道连到对方认领的宿主上。
  */
 
-import type { ClientInfo } from '../../../shared/ipc'
+import type { ClientInfo, PairInfo } from '../../../shared/ipc'
 
 interface DevicesScreenProps {
   clients: ClientInfo[]
   /** 自己的客户端 id：用来在列表里认出「我」 */
   selfClientId?: string
+  /** relay 的实时配对表：谁正在进我的客户端、我进了谁 */
+  pairs?: PairInfo[]
   /** 中继本身是否还连着（重连中时列表还在，但点不进去） */
   online: boolean
   busy: boolean
@@ -28,6 +30,7 @@ interface DevicesScreenProps {
 export function DevicesScreen({
   clients,
   selfClientId = '',
+  pairs = [],
   online,
   busy,
   error,
@@ -85,6 +88,8 @@ export function DevicesScreen({
               const isSelf = !!selfClientId && item.client === selfClientId
               const enterable = !isSelf && !!item.host && online && !busy
               const sessions = item.sessions ?? 0
+              // 谁正进着我：配对是 relay 记的，不是我这边猜的
+              const viewers = pairs.filter((pair) => pair.to === item.client)
               return (
                 <li key={item.client}>
                   <button
@@ -119,9 +124,23 @@ export function DevicesScreen({
                         {item.host && item.host_name
                           ? ` · ${item.host_name.replace(/\.local$/, '')}`
                           : ''}
+                        {viewers.length > 0 && (
+                          <em className="devicecard__pair">
+                            「{viewers.map((v) => v.from_name || v.from.slice(0, 8)).join(' / ')}
+                            」正在查看
+                          </em>
+                        )}
                       </span>
                     </span>
-                    {!isSelf && <span className="devicecard__go">{enterable ? '进入 →' : ''}</span>}
+                    {!isSelf && (
+                      <span className="devicecard__go">
+                        {pairs.some((pair) => pair.from === selfClientId && pair.to === item.client)
+                          ? '配对中'
+                          : enterable
+                            ? '进入 →'
+                            : ''}
+                      </span>
+                    )}
                   </button>
                 </li>
               )

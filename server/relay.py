@@ -132,6 +132,9 @@ class Relay:
         self.ctl_name: Dict[Any, str] = {}
         # 这个客户端认领的宿主（node id）：客户端连上后自查“我这台机器的 agent”再上报。
         self.ctl_host: Dict[Any, str] = {}
+        # 配对：进别人客户端的那个 client id -> {"to": 目标 client id, "node": 宿主 node}
+        # 「进入另一个客户端才是真正的连接」—— 这条表就是那个连接，纯内存，断开即解除。
+        self.pairs: Dict[str, Dict[str, str]] = {}
         # session_id -> 开它的客户端 id。重启 relay 会丢，客户端本地还存了一份。
         self.sid_owner: Dict[str, str] = {}
         # session_id -> relay 分配的编号。宿主进程可能还在自增自己的旧计数，
@@ -387,8 +390,39 @@ class Relay:
             item["sessions"] = len(sessions or [])
         return list(merged.values())
 
+    def pairs_summary(self) -> List[Dict[str, Any]]:
+        """当前配对表（进 -> 被进）。目标客户端已经下线的配对自动作废，不再广播。"""
+        online = {cid for cid in (self.ctl_client.get(w, "") for w in self.ctls) if cid}
+        names: Dict[str, str] = {}
+        for ws in self.ctls:
+            cid = self.ctl_client.get(ws, "")
+            if cid and cid not in names:
+                names[cid] = self.ctl_name.get(ws, "")
+        out: List[Dict[str, Any]] = []
+        for frm, pair in list(self.pairs.items()):
+            to = pair.get("to", "")
+            if not to or to not in online or frm not in online:
+                self.pairs.pop(frm, None)
+                continue
+            out.append(
+                {
+                    "from": frm,
+                    "from_name": names.get(frm, ""),
+                    "to": to,
+                    "to_name": names.get(to, ""),
+                    "node": pair.get("node", ""),
+                }
+            )
+        return out
+
     async def broadcast_clients(self) -> None:
-        await self.broadcast_ctls({"type": "CLIENTS", "clients": self.clients_summary()})
+        await self.broadcast_ctls(
+            {
+                "type": "CLIENTS",
+                "clients": self.clients_summary(),
+                "pairs": self.pairs_summary(),
+            }
+        )
 
     def _apply_resize_to_lists(self, sid: str, cols: int, rows: int) -> None:
         """创建端改了窗口：把新尺寸写回缓存列表。
@@ -584,6 +618,7 @@ class Relay:
                 "agent_online": any(n.ws is not None for n in self.nodes.values()),
                 "nodes": [n.summary() for n in self.nodes.values()],
                 "clients": self.clients_summary(),
+                "pairs": self.pairs_summary(),
                 "server_time": int(time.time()),
                 "version": "1.3.0",
             },
@@ -617,6 +652,30 @@ class Relay:
                     if self.ctl_host.get(ws) != host:
                         self.ctl_host[ws] = host
                         LOG.info("客户端 %s 认领宿主 %s", (self.ctl_client.get(ws) or "-")[:8], host or "-")
+                        await self.broadcast_clients()
+                    continue
+
+                if msg_type in ("CTL_PAIR", "CTL_UNPAIR"):
+                    # 配对 = 「我进了哪个客户端」。不是节点订阅：一个宿主上可能挂着
+                    # 好几个客户端，谁进的谁、要说得清，才能两边都显示出来。
+                    cid = self.ctl_client.get(ws, "")
+                    if msg_type == "CTL_UNPAIR":
+                        changed = bool(self.pairs.pop(cid, None))
+                    else:
+                        node = str(msg.get("node") or "")
+                        target = str(msg.get("client") or "")
+                        if cid and node and target:
+                            self.pairs[cid] = {"to": target, "node": node}
+                            changed = True
+                            LOG.info(
+                                "客户端 %s 进入客户端 %s（宿主 %s）",
+                                (self.ctl_name.get(ws, "") or cid[:8]),
+                                str(msg.get("to_name") or target)[:12],
+                                node,
+                            )
+                        else:
+                            changed = bool(self.pairs.pop(cid, None))
+                    if changed:
                         await self.broadcast_clients()
                     continue
 
@@ -748,9 +807,14 @@ class Relay:
             pass
         finally:
             self.ctls.discard(ws)
-            self.ctl_client.pop(ws, None)
+            gone = self.ctl_client.pop(ws, None) or ""
             self.ctl_name.pop(ws, None)
             self.ctl_host.pop(ws, None)
+            if gone:
+                # 它进的别人、以及别人进它的配对，一起解除
+                self.pairs.pop(gone, None)
+                for frm in [k for k, v in list(self.pairs.items()) if v.get("to") == gone]:
+                    self.pairs.pop(frm, None)
             LOG.info("ctl 下线 %s（剩 %d 个）", ws.remote_address, len(self.ctls))
             # 在线列表就是"此刻连着 wss 的客户端"，走了立刻从列表里消失
             await self.broadcast_clients()

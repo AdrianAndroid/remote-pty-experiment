@@ -220,9 +220,12 @@ function registerIpc(): void {
 
   ipcMain.handle(IpcChannel.RelayStatus, () => relay.status)
 
-  ipcMain.handle(IpcChannel.NodeActivate, async (_event, node: string | null) => {
-    await relay.setActiveNode(node ?? null)
-  })
+  ipcMain.handle(
+    IpcChannel.NodeActivate,
+    async (_event, payload: { node: string | null; client?: string | null } | null) => {
+      await relay.setActiveNode(payload?.node ?? null, payload?.client ?? null)
+    }
+  )
 
   ipcMain.handle(IpcChannel.SessionCreate, async (_event, options) => {
     const result = await relay.create(

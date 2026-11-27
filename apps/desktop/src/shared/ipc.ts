@@ -94,6 +94,15 @@ export interface NodeInfo {
 }
 
 /** 在线客户端：用户看到的就是这个列表，断开 WSS 就从列表里消失。 */
+/** 一次配对：谁进了谁的客户端（relay 内存里的实时表） */
+export interface PairInfo {
+  from: string
+  from_name?: string
+  to: string
+  to_name?: string
+  node?: string
+}
+
 export interface ClientInfo {
   /** 客户端 id：固定，不重装不变 */
   client: string
@@ -121,6 +130,8 @@ export interface RelayStatus {
   clientId?: string
   /** relay 内存里的在线客户端列表 */
   clients?: ClientInfo[]
+  /** 当前所有配对。「我进谁」和「谁进我」都从这张表读 */
+  pairs?: PairInfo[]
   message?: string
 }
 
@@ -191,7 +202,7 @@ export interface RptyBridge {
   getStatus(): Promise<RelayStatus>
   getConfigInfo(): Promise<ConfigInfo>
   /** 进入某台设备（node），或传 null 回到设备列表 */
-  activateNode(node: string | null): Promise<void>
+  activateNode(node: string | null, client?: string | null): Promise<void>
 
   create(options: SessionCreateOptions): Promise<SessionCreateResult>
   write(leafId: string, data: string): void

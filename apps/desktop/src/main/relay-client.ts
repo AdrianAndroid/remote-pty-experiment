@@ -92,7 +92,7 @@ import { join } from 'node:path'
 import { app } from 'electron'
 import WebSocket from 'ws'
 import type {
-  ClientInfo, NodeInfo, RelayConfig, RelayStatus } from '../shared/ipc'
+  ClientInfo, NodeInfo, PairInfo, RelayConfig, RelayStatus } from '../shared/ipc'
 import type { SessionState } from '../shared/protocol'
 
 interface RemoteSession {
@@ -152,6 +152,8 @@ export class RelayClient {
   private hostname = ''
   /** 在线客户端列表（relay 的内存表，断开即消失） */
   private clients: ClientInfo[] = []
+  /** 谁进了我 / 我进了谁（relay 的内存表，同样断开即解除） */
+  private pairs: PairInfo[] = []
   /** 我认领的宿主 node id：本机 agent，认领后不再变 */
   private hostNode = ''
 
@@ -210,7 +212,8 @@ export class RelayClient {
       nodes: this.nodes,
       clientName: this.clientName,
       clientId: this.clientId,
-      clients: this.clients
+      clients: this.clients,
+      pairs: this.pairs
     }
   }
 
@@ -224,6 +227,7 @@ export class RelayClient {
       clientName: this.clientName,
       clientId: this.clientId,
       clients: this.clients,
+      pairs: this.pairs,
       message
     })
   }
@@ -238,7 +242,8 @@ export class RelayClient {
       nodes: this.nodes,
       clientName: this.clientName,
       clientId: this.clientId,
-      clients: this.clients
+      clients: this.clients,
+      pairs: this.pairs
     })
   }
 
@@ -314,9 +319,12 @@ export class RelayClient {
    * 离开只是撤回画面：PTY 不杀、也不进 detached 黑名单（下次进来还要能装回来）。
    * 列表推送由 activeNode 守卫拦住，不会自己偷偷装回来。
    */
-  async setActiveNode(node: string | null): Promise<void> {
-    if (node === this.activeNode) return
+  async setActiveNode(node: string | null, client: string | null = null): Promise<void> {
+    // 同一个宿主可能挂着好几个客户端（同机开两个），所以「进的是哪台节点」和
+    // 「进的是哪个客户端」是两件事：前面决定订阅哪些终端，后面决定配对给谁看。
+    const pairingChanged = node !== this.activeNode || client !== this.pairedClient
     this.activeNode = node
+    this.pairedClient = client
     for (const session of [...this.sessions.values()]) {
       this.closeData(session)
       this.sessions.delete(session.leafId)
@@ -326,6 +334,7 @@ export class RelayClient {
       this.pendingReady.delete(session.leafId)
       this.handlers.onState(session.leafId, 'disconnected')
     }
+    if (pairingChanged) this.announcePair(node, client)
     if (!node) return
     const cached = this.lastLists.get(node)
     if (cached) this.syncFromList(cached, node)
@@ -344,6 +353,32 @@ export class RelayClient {
     this.resetLocalState()
     this.closeCtl()
     this.setStatus('idle')
+  }
+
+  /** 已经配对上的客户端 id（null = 没在进别人的客户端） */
+  private pairedClient: string | null = null
+
+  /** 告诉 relay「我进了谁 / 我不进了」，这样对方那边也能看到配对状态。 */
+  private announcePair(node: string | null, client: string | null): void {
+    const ws = this.ctl
+    if (!ws || ws.readyState !== 1) return
+    try {
+      if (node && client) {
+        const target = this.clients.find((item) => item.client === client)
+        ws.send(
+          JSON.stringify({
+            type: 'CTL_PAIR',
+            node,
+            client,
+            to_name: target?.name ?? ''
+          })
+        )
+      } else {
+        ws.send(JSON.stringify({ type: 'CTL_UNPAIR' }))
+      }
+    } catch {
+      // ctl 刚断，重连后会重新发
+    }
   }
 
   /** 告诉 relay 我是主动断开，不是断网。 */
@@ -533,11 +568,16 @@ export class RelayClient {
         // 重新连上 = 重新和宿主对表：之前手动撤掉的镜像会话，只要 PTY 还在就再挂回来。
         this.detached.clear()
         if (Array.isArray(msg.clients)) this.clients = msg.clients as ClientInfo[]
+        if (Array.isArray(msg.pairs)) this.pairs = msg.pairs as PairInfo[]
         if (msg.nodes) this.updateNodes(msg.nodes)
         else this.setAgentOnline(Boolean(msg.agent_online))
         this.setStatus('online')
         this.backoff = 600
         if (this.hostNode) this.claimHost(this.hostNode)
+        // 重连后要把「我还在谁那儿」重新报一次，不然对方那边配对就丢了
+        if (this.activeNode && this.pairedClient) {
+          this.announcePair(this.activeNode, this.pairedClient)
+        }
         this.resyncSessions()
         break
 
@@ -548,6 +588,7 @@ export class RelayClient {
       case 'CLIENTS':
         if (Array.isArray(msg.clients)) {
           this.clients = msg.clients as ClientInfo[]
+          if (Array.isArray(msg.pairs)) this.pairs = msg.pairs as PairInfo[]
           this.setStatus(this.phase)
         }
         break
