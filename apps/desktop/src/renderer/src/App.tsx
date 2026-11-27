@@ -20,6 +20,47 @@ import { DevicesScreen } from './screens/devices'
 
 const MAX_SESSIONS = 20
 
+/**
+ * 标签元数据的本地存储。
+ *
+ * 键是 sessionId（relay 侧会话身份），不是 leafId —— leafId 每次进程启动都重新随机，
+ * 拿它当身份的话重连之后标题、顺序、选中全部丢失。
+ * 按 userData 隔离，所以「换一个客户端」天然是干净标签列。
+ */
+interface StoredTab {
+  sessionId: string
+  title: string
+  order: number
+}
+
+interface StoredDevice {
+  active: string | null
+  items: StoredTab[]
+}
+
+type TabStore = Record<string, StoredDevice>
+
+const TAB_STORE_KEY = 'rpty.tabs.v1'
+
+function readTabStore(): TabStore {
+  try {
+    const raw = localStorage.getItem(TAB_STORE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as TabStore
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeTabStore(store: TabStore): void {
+  try {
+    localStorage.setItem(TAB_STORE_KEY, JSON.stringify(store))
+  } catch {
+    // 存不下就算了，标签还能用，只是重连后回到默认标题
+  }
+}
+
 /** 粗估一个尺寸给新 PTY，随后 fit() 会校准并发 SESSION_RESIZE。 */
 function estimateSize(): { cols: number; rows: number } {
   const host = document.querySelector('.pane--active .pane__host') as HTMLElement | null
@@ -55,6 +96,8 @@ export default function App(): React.JSX.Element {
   const autoCreatedRef = useRef(false)
   const readOnlyRef = useRef(false)
   const activeNodeRef = useRef<string | null>(null)
+  /** 进设备时要从存储里选回来的那个 sessionId（只生效一次） */
+  const pendingActiveRef = useRef<string | null>(null)
   const activeIdRef = useRef<string | null>(null)
   const sessionsRef = useRef<SessionMeta[]>([])
   activeIdRef.current = activeId
@@ -64,10 +107,39 @@ export default function App(): React.JSX.Element {
 
   // ---------------------------------------------------------- 初始化
 
+  /**
+   * 把当前标签列写回本地存储。
+   *
+   * 只在确实有标签时写：离开设备 / 刚进设备还没拿到快照时都是空列，
+   * 那种空白不能覆盖掉上次的记录。
+   */
+  const persistTabs = useCallback(() => {
+    const node = activeNodeRef.current
+    if (!node || sessionsRef.current.length === 0) return
+    const items = sessionsRef.current
+      .filter((item) => item.sessionId)
+      .map((item, index) => ({
+        sessionId: item.sessionId as string,
+        title: item.title,
+        order: item.order ?? index
+      }))
+    if (items.length === 0) return
+    const store = readTabStore()
+    store[node] = {
+      active:
+        sessionsRef.current.find((item) => item.id === activeIdRef.current)?.sessionId ?? null,
+      items
+    }
+    writeTabStore(store)
+  }, [])
+
   /** 把主进程的会话快照合进标签列（按 leafId 去重，可以反复调）。 */
   const applySnapshot = useCallback((list: SessionAdoptedPayload[]) => {
     if (!Array.isArray(list) || list.length === 0) return
     autoCreatedRef.current = true
+    // 上次这个设备留下的标题 / 顺序 / 选中，按 sessionId 对回去
+    const saved = readTabStore()[activeNodeRef.current ?? '']
+    const savedById = new Map((saved?.items ?? []).map((item) => [item.sessionId, item]))
     setSessions((prev) => {
       const known = new Set(prev.map((item) => item.id))
       const added = list
@@ -75,9 +147,12 @@ export default function App(): React.JSX.Element {
         .map((item) => {
           // 编号跟被控机走：两个窗口看到的是同一个「终端 N」。
           if (item.index > seqRef.current) seqRef.current = item.index
+          const old = savedById.get(item.sessionId)
           return {
             id: item.leafId,
-            title: `终端 ${item.index || ++seqRef.current}`,
+            sessionId: item.sessionId,
+            title: old?.title ?? `终端 ${item.index || ++seqRef.current}`,
+            order: old?.order ?? item.index,
             state: 'active' as const,
             owned: item.owned,
             cols: item.cols,
@@ -86,10 +161,21 @@ export default function App(): React.JSX.Element {
           }
         })
       if (added.length === 0) return prev
-      setActiveId((current) => current ?? added[0].id)
-      return [...prev, ...added]
+      const merged = [...prev, ...added].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+      setActiveId((current) => {
+        const want = pendingActiveRef.current ?? saved?.active
+        const hit = want ? merged.find((item) => item.sessionId === want) : undefined
+        if (hit) pendingActiveRef.current = null
+        return hit?.id ?? current ?? merged[0].id
+      })
+      return merged
     })
   }, [])
+
+  // 标签列、顺序、选中变了就落盘（persistTabs 自己会跳过空列）
+  useEffect(() => {
+    persistTabs()
+  }, [sessions, activeId, persistTabs])
 
   useEffect(() => {
     void window.rpty.getConfigInfo().then(setConfig)
@@ -120,16 +206,38 @@ export default function App(): React.JSX.Element {
     })
 
     // 被控端上已有会话（另一个客户端开的）：不新建，直接挂上去镜像同一块终端。
-    const offAdopted = window.rpty.onAdopted(({ leafId, owned, index, cols, rows, node }) => {
-      setSessions((prev) => {
-        if (prev.some((item) => item.id === leafId)) return prev
-        autoCreatedRef.current = true
-        if (index > seqRef.current) seqRef.current = index
-        const title = `终端 ${index || ++seqRef.current}`
-        setActiveId((current) => current ?? leafId)
-        return [...prev, { id: leafId, title, state: 'active', owned, cols, rows, node }]
-      })
-    })
+    const offAdopted = window.rpty.onAdopted(
+      ({ leafId, sessionId, owned, index, cols, rows, node }) => {
+        setSessions((prev) => {
+          if (prev.some((item) => item.id === leafId)) return prev
+          autoCreatedRef.current = true
+          if (index > seqRef.current) seqRef.current = index
+          // 同一个 PTY 上次摆在哪、叫什么，按 sessionId 找回来
+          const saved = readTabStore()[node ?? activeNodeRef.current ?? '']?.items.find(
+            (item) => item.sessionId === sessionId
+          )
+          const title = saved?.title ?? `终端 ${index || ++seqRef.current}`
+          const order = saved?.order ?? index
+          const wantActive = pendingActiveRef.current === sessionId
+          if (wantActive) pendingActiveRef.current = null
+          setActiveId((current) => (wantActive ? leafId : (current ?? leafId)))
+          return [
+            ...prev,
+            {
+              id: leafId,
+              sessionId,
+              title,
+              order,
+              state: 'active' as const,
+              owned,
+              cols,
+              rows,
+              node
+            }
+          ].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+        })
+      }
+    )
 
     // 归属可能后到：relay 认出这个终端是谁开的，或者另一个窗口刚把它关掉。
     const offOwned = window.rpty.onOwned(({ leafId, owned }) => {
@@ -270,15 +378,28 @@ export default function App(): React.JSX.Element {
     const title = `终端 ${++seqRef.current}`
     // 先乐观插标签再发请求：连点两下会立刻出现两个标签，
     // 各自走自己的 IPC，不会因为上一发还没回来就被吃掉。
-    setSessions((prev) => [
-      ...prev,
-      { id: leafId, title, state: 'connecting', owned: true, node: target }
-    ])
+    setSessions((prev) => {
+      const maxOrder = prev.reduce((max, item) => Math.max(max, item.order ?? -1), -1)
+      return [...prev, { id: leafId, title, state: 'connecting', owned: true, node: target, order: maxOrder + 1 }]
+    })
     setActiveId(leafId)
     const result = await window.rpty.create({ leafId, cols, rows, target })
     if (!result.ok) {
       setSessions((prev) => prev.filter((item) => item.id !== leafId))
       setError(result.error ?? '创建终端失败')
+      return
+    }
+    // 认领身份：有了 sessionId，这个标签重连之后才能带着标题和位置回来
+    if (result.sessionId) {
+      const sessionId = result.sessionId
+      setSessions((prev) => {
+        const maxOrder = prev.reduce((max, item) => Math.max(max, item.order ?? -1), -1)
+        return prev.map((item) =>
+          item.id === leafId
+            ? { ...item, sessionId, order: item.order ?? maxOrder + 1 }
+            : item
+        )
+      })
     }
   }, [])
 
@@ -417,6 +538,10 @@ export default function App(): React.JSX.Element {
       setSessions([])
       setActiveId(null)
       autoCreatedRef.current = false
+      // 先落 ref 再 await：主进程会立刻按缓存 adopt 并推事件回来，
+      // 那时 useState 还没生效，靠 ref 才知道这是哪台设备（否则标题/顺序对不上）。
+      activeNodeRef.current = node
+      pendingActiveRef.current = readTabStore()[node]?.active ?? null
       await window.rpty.activateNode(node)
       setActiveNode(node)
       const list = await window.rpty.snapshotSessions()
@@ -427,6 +552,7 @@ export default function App(): React.JSX.Element {
 
   /** 离开设备：撤画面、不动 PTY。列表页继续抱着中继连接。 */
   const leaveDevice = useCallback(async () => {
+    activeNodeRef.current = null
     await window.rpty.activateNode(null)
     setActiveNode(null)
     setSessions([])

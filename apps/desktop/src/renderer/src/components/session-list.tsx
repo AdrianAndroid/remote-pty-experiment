@@ -19,6 +19,13 @@ export interface SessionMeta {
   rows?: number
   /** 这个终端跑在哪台机器上（多节点时才有意义，界面不显示） */
   node?: string
+  /**
+   * 会话身份（relay 侧），PTY 活着就不变。
+   * 标签标题 / 顺序 / 选中靠它持久化 —— leafId 每次启动都会变，不能当身份。
+   */
+  sessionId?: string
+  /** 用户摆的位置，越小越前；没摆过就按 relay 的 index */
+  order?: number
 }
 
 interface SessionListProps {
