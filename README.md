@@ -63,9 +63,10 @@
 | [docs/13-relay-lite.md](docs/13-relay-lite.md) | **Relay 轻量化**：房间模型，90 行零配置，数据全留宿主 |
 | [docs/14-one-to-one.md](docs/14-one-to-one.md) | **一对一 · 单向建链 · 双向使用**：最终收敛模型（删掉撞车与多桥） |
 | [docs/15-presence-and-pairing.md](docs/15-presence-and-pairing.md) | **在线列表与点击配对**：control/data 双连接，presence 模型 |
+| [docs/16-password-and-psk.md](docs/16-password-and-psk.md) | **密码与 PSK**：密码作为 E2E 握手暗号，不进 relay |
 | [openspec/](openspec/) | 需求规格与变更（本项目所有功能变更必须先立 OpenSpec change） |
 
-> 阅读顺序建议：`01 → 02 → 03 → 08 → 12 → 14 → 15 → 13 → 11 → 09`。
+> 阅读顺序建议：`01 → 02 → 03 → 08 → 12 → 14 → 15 → 16 → 13 → 11 → 09`。
 > `02` / `03` 中关于固定角色（agent / terminal）的部分已被 `10` 取代，其余内容仍然有效。
 
 ---
