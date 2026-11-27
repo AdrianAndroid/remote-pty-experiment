@@ -37,7 +37,8 @@ export function DevicesScreen({
   const sorted = [...nodes].sort((a, b) => Number(b.online) - Number(a.online))
   // 同一台机器跑多个 agent 时显示名会一样，靠 id 尾段区分；名字唯一时不显示，保持干净
   const nameCount = new Map<string, number>()
-  for (const node of sorted) nameCount.set(node.name, (nameCount.get(node.name) ?? 0) + 1)
+  // 按“人看到的名字”判重，而不是原始 name：`x` 与 `x.local` 在界面上一样，也算撞车
+  for (const node of sorted) nameCount.set(pretty(node.name), (nameCount.get(pretty(node.name)) ?? 0) + 1)
   // 只认「-<4 位 hex>」这种自动生成的后缀；人工起的节点名（如主机名本身）不硬拆
   const tail = (id: string): string => /-([0-9a-f]{4})$/.exec(id)?.[1] ?? ''
 
@@ -98,15 +99,14 @@ export function DevicesScreen({
                   <span className="devicecard__main">
                     <span className="devicecard__name">
                       {pretty(node.name)}
-                      {(nameCount.get(node.name) ?? 0) > 1 && tail(node.node) && (
+                      {(nameCount.get(pretty(node.name)) ?? 0) > 1 && tail(node.node) && (
                         <em className="devicecard__badge devicecard__badge--id">{tail(node.node)}</em>
                       )}
-                      {node.local && <em className="devicecard__badge">本机</em>}
                     </span>
                     <span className="devicecard__meta">
                       {node.online ? `${node.sessions} 个终端` : '离线'}
-                      {pretty(node.node) !== pretty(node.name) &&
-                        (nameCount.get(node.name) ?? 0) > 1 &&
+                      {(nameCount.get(pretty(node.name)) ?? 0) > 1 &&
+                        pretty(node.node) !== pretty(node.name) &&
                         ` · ${node.node}`}
                     </span>
                   </span>

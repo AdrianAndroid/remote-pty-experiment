@@ -78,7 +78,6 @@ export class RelayClient {
   /** 当前在线的节点列表（多机）。单机时只有一项。 */
   private nodes: NodeInfo[] = []
   /** 本机节点标识，用来判断「本机共享」是否可用。默认取主机名短名。 */
-  private readonly localNode = os.hostname().split('.')[0]
   private backoff = 600
   /**
    * 渲染层的 xterm 是后挂载的（窗口加载晚于 relay 连接），早到的字节必须先攒住，
@@ -170,20 +169,17 @@ export class RelayClient {
         name: String(n.name ?? n.node ?? ''),
         platform: n.platform ? String(n.platform) : undefined,
         online: Boolean(n.online),
-        sessions: Number(n.sessions ?? 0) || 0,
-        local: String(n.node ?? '') === this.localNode
+        sessions: Number(n.sessions ?? 0) || 0
       }))
 
-    // 左上角那个「宿主 xxx」：优先本机，其次唯一在线节点，多台非本机时不写死一台。
+    // 左上角那个「宿主 xxx」：只有一台在线时直接写它，多台就写个数，不猜"哪台是我"。
     const online = this.nodes.filter((n) => n.online)
-    const local = online.find((n) => n.local)
     const label =
-      local?.name ||
-      (online.length === 1
+      online.length === 1
         ? online[0].name
         : online.length > 1
           ? `${online.length} 个节点`
-          : '')
+          : ''
     if (label) this.hostname = label
 
     this.setAgentOnline(online.length > 0)

@@ -92,7 +92,6 @@ export interface NodeInfo {
   /** 这台机器上现有的会话数 */
   sessions: number
   /** 是不是本机 —— 由客户端配置推算，relay 不知道 */
-  local?: boolean
 }
 
 export interface RelayStatus {
