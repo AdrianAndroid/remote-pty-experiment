@@ -180,7 +180,7 @@ class Session:
         try:
             while not self.closed:
                 try:
-                    async with websockets.connect(url, max_size=None, ping_interval=20) as ws:
+                    async with websockets.connect(url, max_size=None, ping_interval=20, proxy=None) as ws:
                         self.ws = ws
                         LOG.info("会话 %s 数据通道已连", self.sid[:8])
                         if self.buffer:
@@ -269,7 +269,7 @@ class Agent:
             await asyncio.sleep(delay)
 
     async def run_once(self) -> None:
-        async with websockets.connect(self.signal_url, ping_interval=20, max_size=None) as ws:
+        async with websockets.connect(self.signal_url, ping_interval=20, max_size=None, proxy=None) as ws:
             self.ws = ws
             self.backoff = 1.0
             LOG.info("已连上 relay %s", self.relay)
