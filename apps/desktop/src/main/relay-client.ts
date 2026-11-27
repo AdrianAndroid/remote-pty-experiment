@@ -56,6 +56,8 @@ export interface RelayHandlers {
   onError(code: string, message: string): void
   /** 会话归属变了（relay 告诉了我们谁是主人，或者别的窗口关了它）。 */
   onOwned(leafId: string, owned: boolean): void
+  /** 整个节点的终端都没了（宿主退出 / 离线超时）：标签要真删掉，不是变灰。 */
+  onRemoved(leafId: string): void
 }
 
 const CONNECT_TIMEOUT = 12_000
@@ -88,6 +90,9 @@ export class RelayClient {
   private readOnly = false
   private reconnectTimer: NodeJS.Timeout | null = null
   private resyncTimer: NodeJS.Timeout | null = null
+  /** 节点离线后等多久算「宿主真的没了」。网络抖动不该把标签清掉。 */
+  private static readonly NODE_GONE_MS = 30000
+  private readonly nodeGoneTimers = new Map<string, NodeJS.Timeout>()
   private manualClose = false
   /**
    * 这个客户端自己的身份证。存储在 userData 里，重启不变 ——
@@ -330,6 +335,7 @@ export class RelayClient {
         break
 
       case 'NODE_ONLINE':
+        this.cancelNodeGone(String(msg.node ?? ''))
         this.setAgentOnline(true)
         this.resyncSessions()
         break
@@ -342,6 +348,8 @@ export class RelayClient {
             this.handlers.onState(session.leafId, 'disconnected', `节点 ${node || ''} 离线`)
           }
         }
+        // 先留着（可能只是断网），超时还没回来就当宿主没了。
+        this.scheduleNodeGone(node)
         break
       }
 
@@ -361,6 +369,8 @@ export class RelayClient {
 
       case 'SESSION_LIST': {
         const node = String(msg.node ?? '')
+        // 节点还活着，撤掉「宿主没了」的倒计时。
+        this.cancelNodeGone(node)
         this.syncFromList(msg.sessions, node)
         break
       }
@@ -372,6 +382,26 @@ export class RelayClient {
         // 主进程自己也要记状态：节点掉线时要靠它判断「这个会话是不是真的断了」。
         session.state = 'active'
         this.handlers.onState(session.leafId, 'active')
+        break
+      }
+
+      case 'SESSION_CLOSED': {
+        // 另一端点了 ×：会话确实没了，但不删本端标签 —— 留个灰的比默默消失更清楚。
+        const sid = String(msg.session_id ?? '')
+        const session = this.bySessionId.get(sid)
+        if (!session) break
+        if (session.state !== 'exited') {
+          session.state = 'exited'
+          this.handlers.onExit(session.leafId, 0)
+          this.closeData(session)
+        }
+        break
+      }
+
+      case 'NODE_GONE': {
+        // 宿主走了：这台机器上的终端全部作废，标签整批摘掉。
+        this.cancelNodeGone(String(msg.node ?? ''))
+        this.removeNode(String(msg.node ?? ''))
         break
       }
 
@@ -487,25 +517,57 @@ export class RelayClient {
     for (const session of [...this.sessions.values()]) {
       if (seen.has(session.sessionId)) continue
       if (node && session.node !== node) continue
-
-      if (session.owned) {
-        // 自己开的终端从远端列表里消失：多半是另一个窗口、或者宿主那边把它关了。
-        // 标签留着（不擅自删用户的东西），但必须置灰并断掉数据通道 ——
-        // 之前这里直接 continue，结果另一端关完，这边还显示"活着"，点进去是死的。
-        if (now - session.createdAt < 3000) continue
-        if (session.state !== 'exited') {
-          session.state = 'exited'
-          this.handlers.onExit(session.leafId, 0)
-          this.closeData(session)
-        }
-        continue
+      // 刚建的会话可能还在等下一份列表，别急着判死。
+      if (now - session.createdAt < 3000) continue
+      // 统一处理：列表里没有 = 这个终端没了（被人关掉 / PTY 退出）。
+      // 标签一律留着变灰 —— 「谁关的、什么时候没的」这个信息有价值，
+      // 真删除只发生在宿主消失（NODE_GONE / 离线超时）那条路上。
+      if (session.state !== 'exited') {
+        session.state = 'exited'
+        this.handlers.onExit(session.leafId, 0)
+        this.closeData(session)
       }
+    }
+  }
 
-      session.state = 'exited'
-      this.handlers.onExit(session.leafId)
+  /** 节点离线后开始倒计时；链路恢复（NODE_ONLINE / SESSION_LIST）就撤销。 */
+  private scheduleNodeGone(node: string): void {
+    if (!node || this.nodeGoneTimers.has(node)) return
+    const timer = setTimeout(() => {
+      this.nodeGoneTimers.delete(node)
+      const alive = this.nodes.some((item) => item.node === node && item.online)
+      if (!alive) this.removeNode(node)
+    }, RelayClient.NODE_GONE_MS)
+    this.nodeGoneTimers.set(node, timer)
+  }
+
+  private cancelNodeGone(node: string): void {
+    const timer = node ? this.nodeGoneTimers.get(node) : undefined
+    if (timer) {
+      clearTimeout(timer)
+      this.nodeGoneTimers.delete(node)
+    }
+  }
+
+  /**
+   * 整台机器的终端都没了（宿主退出 / 离线超时）：标签批量摘掉。
+   *
+   * 这是唯一会「真删除」用户标签的地方。控制端关掉单个终端不走到这儿 ——
+   * 那种情况留灰标签，让用户自己决定什么时候清掉。
+   */
+  private removeNode(node: string): void {
+    let removed = 0
+    for (const session of [...this.sessions.values()]) {
+      if (node && session.node !== node) continue
       this.closeData(session)
       this.sessions.delete(session.leafId)
       this.bySessionId.delete(session.sessionId)
+      if (this.ownedIds.delete(session.sessionId)) saveOwned(this.ownedIds)
+      this.handlers.onRemoved(session.leafId)
+      removed += 1
+    }
+    if (removed > 0) {
+      console.log(`[rpty] 节点 ${node || '(unknown)'} 消失，摘掉 ${removed} 个标签`)
     }
   }
 

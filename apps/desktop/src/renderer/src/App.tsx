@@ -120,6 +120,17 @@ export default function App(): React.JSX.Element {
       setSessions((prev) => prev.map((item) => (item.id === leafId ? { ...item, owned } : item)))
     })
 
+    // 宿主整台机器没了：这一批标签整批消失，不是置灰。
+    const offRemoved = window.rpty.onRemoved(({ leafId }) => {
+      setSessions((prev) => {
+        const next = prev.filter((item) => item.id !== leafId)
+        if (activeIdRef.current === leafId) {
+          setActiveId(next.length > 0 ? next[next.length - 1].id : null)
+        }
+        return next
+      })
+    })
+
     const offError = window.rpty.onError(({ code, message }) => {
       setError(message ? `${message}（${code}）` : code)
     })
@@ -132,6 +143,7 @@ export default function App(): React.JSX.Element {
       offExit()
       offAdopted()
       offOwned()
+      offRemoved()
       offError()
       offReadOnly()
     }

@@ -366,6 +366,15 @@ class Agent:
         except ConnectionClosed:
             pass
 
+    async def send_host_exit(self) -> None:
+        """正常退出前跟 relay 打声招呼。
+
+        不发的话，另一端只能靠「节点离线 + 超时」猜到宿主没了，要干等一分钟；
+        发了就是立刻清屏。kill -9 / 断电这类硬退出发不出去，只能靠超时兜底。
+        """
+        LOG.info("通知 relay：本机宿主退出")
+        await self.reply({"type": "HOST_EXIT", "node": self.node_id})
+
     async def on_viewer_joined(self, message: Dict[str, Any]) -> None:
         """有新客户端挂到这个会话：把环形缓冲当「当前屏幕」补给它。
 
@@ -544,6 +553,9 @@ async def amain() -> None:
 
     runner = asyncio.create_task(agent.run())
     await stop
+    # 先告别再断电：让另一端立刻清掉本节点的标签，不用等离线超时。
+    await agent.send_host_exit()
+    await asyncio.sleep(0.2)
     runner.cancel()
     for session in list(agent.sessions.values()):
         session.close()

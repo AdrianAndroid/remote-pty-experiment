@@ -351,6 +351,28 @@ class Relay:
             {"type": "NODES", "nodes": [n.summary() for n in self.nodes.values()]}
         )
 
+    def _drop_from_lists(self, sid: str) -> None:
+        """把某个会话从各节点的缓存列表里摘掉。
+
+        不摘的话，后连上的客户端会从缓存里 adopt 一个已经被关掉的会话，
+        拿到一块永远没有回显的黑屏。
+        """
+        for node in self.nodes.values():
+            cached = node.last_list
+            if not isinstance(cached, dict):
+                continue
+            sessions = cached.get("sessions")
+            if not isinstance(sessions, list):
+                continue
+            node.last_list = {
+                **cached,
+                "sessions": [
+                    item
+                    for item in sessions
+                    if str((item or {}).get("session_id") or "") != sid
+                ],
+            }
+
     async def handle_agent(self, ws: WebSocketServerProtocol, node_id: str) -> None:
         node = self.nodes.get(node_id)
         if node is None:
@@ -384,6 +406,22 @@ class Relay:
                     # 快照只补给它要补的那个新 viewer，不能广播，
                     # 否则已经开着画面的端会被历史重画一遍。
                     await self.deliver_snapshot(msg)
+                    continue
+
+                if kind == "HOST_EXIT":
+                    # 宿主正常退出前主动告别：这台机器上的终端全没了。
+                    # 直接让所有控制端清掉，别让他们守着一屏灰标签等超时。
+                    LOG.info("节点 %s 主动退出（HOST_EXIT）", node_id)
+                    node.last_list = {
+                        "type": "SESSION_LIST",
+                        "node": node_id,
+                        "name": node.name,
+                        "sessions": [],
+                    }
+                    await self.broadcast_ctls(
+                        {"type": "NODE_GONE", "node": node_id, "reason": "host_exit"}
+                    )
+                    await self.broadcast_nodes()
                     continue
 
                 if kind == "HELLO":
@@ -566,6 +604,22 @@ class Relay:
                             # 镜像端不改 PTY 尺寸，否则两端会互相拉扯、画面来回跳。
                             LOG.debug("忽略非 owner 的 resize sid=%s", sid[:8])
                             continue
+
+                    if msg_type == "SESSION_CLOSE":
+                        closed_sid = str(msg.get("session_id") or "")
+                        if closed_sid:
+                            # 有人主动点了 ×：从缓存里摘掉，并告诉所有控制端"这是关掉的，
+                            # 不是断了" —— 他们要把标签留成灰色，而不是继续当活着。
+                            self._drop_from_lists(closed_sid)
+                            await self.broadcast_ctls(
+                                {
+                                    "type": "SESSION_CLOSED",
+                                    "session_id": closed_sid,
+                                    "node": node.node_id,
+                                    "reason": "ctl",
+                                }
+                            )
+                            await self.broadcast_nodes()
 
                     await self.send_json(node.ws, {**msg, "src": "ctl"})
                 else:
