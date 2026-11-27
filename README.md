@@ -68,6 +68,7 @@
 | [docs/17-optional-psk.md](docs/17-optional-psk.md) | **可选密码与 TOFU**：密码可选、加密不可选，ECDH + 静态密钥 |
 | [docs/18-directional-permission.md](docs/18-directional-permission.md) | **方向性权限**：建链不需密码，反向控制需密码（提权模型） |
 | [docs/19-ui-prototype.md](docs/19-ui-prototype.md) | **UI 原型**：8 屏 ASCII 图、状态图标、文案对照、交互流 |
+| [docs/20-relay-service.md](docs/20-relay-service.md) | **服务端工程方案**：技术栈、单进程约束、Caddy + systemd、运维 |
 | [openspec/](openspec/) | 需求规格与变更（本项目所有功能变更必须先立 OpenSpec change） |
 
 > 阅读顺序建议：`00 → 01 → 02 → 03 → 08 → 12 → 14 → 15 → 16 → 17 → 18 → 19 → 13 → 11 → 09`。
