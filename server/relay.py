@@ -386,8 +386,17 @@ class Relay:
             node = self.nodes.get(item["host"]) if item["host"] else None
             item["host_name"] = node.name if node else ""
             item["host_online"] = bool(node and node.ws is not None)
-            sessions = (node.last_list or {}).get("sessions") if node else None
-            item["sessions"] = len(sessions or [])
+            # 卡片上写的是「这个客户端自己的终端数」，不是整台机器上有多少：
+            # 一张桌面一套终端，数别人的会让两个客户端都显示同一个大数字。
+            alive = {
+                str(row.get("session_id") or "")
+                for row in ((node.last_list or {}).get("sessions") or [])
+                if isinstance(row, dict)
+            } if node else set()
+            cid = item["client"]
+            item["sessions"] = sum(
+                1 for sid, owner in self.sid_owner.items() if owner == cid and sid in alive
+            )
         return list(merged.values())
 
     def pairs_summary(self) -> List[Dict[str, Any]]:
