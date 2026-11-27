@@ -63,13 +63,29 @@ export function SessionList({
   return (
     <aside className={collapsed ? 'sidebar sidebar--collapsed' : 'sidebar'}>
       <header className="sidebar__head">
-        <div className="sidebar__brand" title={hostname || '未连接'}>
+        <div
+          className="sidebar__brand"
+          title={
+            hostname
+              ? `所有终端的 shell 都跑在这台宿主机上：${hostname}`
+              : '未连接'
+          }
+        >
           <span className="sidebar__logo">▚</span>
           {!collapsed && (
             <div className="sidebar__names">
               <strong>rpty</strong>
               <span className={online ? 'dot dot--on' : 'dot dot--off'}>
-                {online ? hostname || '已连接' : phase === 'connecting' ? '连接中…' : '未连接'}
+                {online ? (
+                  <>
+                    <span className="sidebar__role">宿主</span>
+                    {(hostname || '已连接').replace(/\.local$/, '')}
+                  </>
+                ) : phase === 'connecting' ? (
+                  '连接中…'
+                ) : (
+                  '未连接'
+                )}
               </span>
             </div>
           )}

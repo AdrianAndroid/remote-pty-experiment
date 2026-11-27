@@ -631,3 +631,21 @@ code {
 .tab--active .tab__badge {
   opacity: 1;
 }
+
+/* ---------------------------------------------------------------- 宿主标识 */
+
+.sidebar__role {
+  margin-right: 4px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: #1d2331;
+  color: var(--text-faint);
+  font-size: 9px;
+  letter-spacing: 0.5px;
+}
+
+.sidebar__names .dot {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
