@@ -37,6 +37,9 @@ interface SessionListProps {
   onToggleReadOnly: () => void
   /** 断开整台客户端到 relay 的链路（宿主上的 PTY 不动，可以再连回来） */
   onDisconnect: () => void
+  /** 返回设备列表（只撤画面，宿主上的 PTY 不动） */
+  onBack?: () => void
+  backLabel?: string
 }
 
 const STATE_LABEL: Record<SessionState, string> = {
@@ -61,7 +64,9 @@ export function SessionList({
   onRename,
   onToggle,
   onToggleReadOnly,
-  onDisconnect
+  onDisconnect,
+  onBack,
+  backLabel = '设备'
 }: SessionListProps): React.JSX.Element {
   const online = phase === 'online' && agentOnline
 
@@ -83,7 +88,7 @@ export function SessionList({
               <span className={online ? 'dot dot--on' : 'dot dot--off'}>
                 {online ? (
                   <>
-                    <span className="sidebar__role">宿主</span>
+                    <span className="sidebar__role">设备</span>
                     {(hostname || '已连接').replace(/\.local$/, '')}
                   </>
                 ) : phase === 'connecting' ? (
@@ -104,6 +109,19 @@ export function SessionList({
           {collapsed ? '»' : '«'}
         </button>
       </header>
+
+      {onBack && (
+        <button
+          type="button"
+          className="backbtn"
+          onClick={onBack}
+          title={`返回${backLabel}列表（⌘⇧E）· 这里的终端会继续跑`}
+        >
+          <span className="backbtn__arrow">←</span>
+          {!collapsed && <span>{backLabel}</span>}
+          {!collapsed && <kbd>⌘⇧E</kbd>}
+        </button>
+      )}
 
       {!collapsed && (
         <div className="sidebar__section">终端</div>
@@ -189,10 +207,10 @@ export function SessionList({
         type="button"
         className="modebtn modebtn--disconnect"
         onClick={onDisconnect}
-        title="断开与 relay 的连接（⌘⇧D）· 宿主上的终端会继续跑，随时可以再连回来"
+        title="退出中继（⌘⇧D）· 另一台配对的客户端会一起断；设备上的终端继续跑，随时可以再连回来"
       >
         <span className="modebtn__dot" />
-        {!collapsed && <span>断开连接</span>}
+        {!collapsed && <span>退出中继</span>}
         {!collapsed && <kbd>⌘⇧D</kbd>}
       </button>
 

@@ -19,6 +19,8 @@ export const IpcChannel = {
   RelayStatus: 'relay:status',
   /** 渲染 -> 主：读取已保存的地址与「是否有 token」 */
   ConfigInfo: 'config:info',
+  /** 渲染 -> 主：进入 / 离开一台设备（null = 回设备列表，不为任何会话开数据通道） */
+  NodeActivate: 'node:activate',
 
   /** 渲染 -> 主：开一个会话 */
   SessionCreate: 'session:create',
@@ -56,7 +58,16 @@ export const IpcChannel = {
   MenuCommand: 'menu:command'
 } as const
 
-export type MenuCommand = 'new-tab' | 'close-tab' | 'next-tab' | 'prev-tab' | 'goto-tab' | 'toggle-sidebar' | 'toggle-readonly' | 'disconnect'
+export type MenuCommand =
+  | 'new-tab'
+  | 'close-tab'
+  | 'next-tab'
+  | 'prev-tab'
+  | 'goto-tab'
+  | 'toggle-sidebar'
+  | 'toggle-readonly'
+  | 'devices'
+  | 'disconnect'
 
 export interface ConfigInfo {
   url: string
@@ -160,6 +171,8 @@ export interface RptyBridge {
   reconnect(): Promise<RelayStatus>
   getStatus(): Promise<RelayStatus>
   getConfigInfo(): Promise<ConfigInfo>
+  /** 进入某台设备（node），或传 null 回到设备列表 */
+  activateNode(node: string | null): Promise<void>
 
   create(options: SessionCreateOptions): Promise<SessionCreateResult>
   write(leafId: string, data: string): void

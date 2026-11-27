@@ -99,6 +99,15 @@ export class RelayClient {
   private readonly nodeGoneTimers = new Map<string, NodeJS.Timeout>()
   /** 本端主动"撤掉画面"的镜像会话。PTY 还在宿主上，只是这边不想看了。 */
   private readonly detached = new Set<string>()
+  /**
+   * 当前进入的设备（节点 id）。null = 停在设备列表 —— 一条数据通道都不开。
+   *
+   * 这是「先连中继、再选机器」的关键：连上 WSS 只代表能收到节点上下线，
+   * 不等于要把所有机器上的所有终端都镜像过来。
+   */
+  private activeNode: string | null = null
+  /** 各节点最近一次上报的会话列表。没进入设备也记着，点进去立刻能挂上。 */
+  private readonly lastLists = new Map<string, unknown[]>()
   private manualClose = false
   /**
    * 这个客户端自己的身份证。存储在 userData 里，重启不变 ——
@@ -195,6 +204,33 @@ export class RelayClient {
    * 宿主上的 PTY 一个都不动，只是这边不再收不发。所以本地状态要**清干净**，
    * 否则重连时旧 leafId、旧字节缓冲、旧节点定时器会和 relay 新推的列表打架。
    */
+  /**
+   * 进入 / 离开一台设备。
+   *
+   * 离开只是撤回画面：PTY 不杀、也不进 detached 黑名单（下次进来还要能装回来）。
+   * 列表推送由 activeNode 守卫拦住，不会自己偷偷装回来。
+   */
+  async setActiveNode(node: string | null): Promise<void> {
+    if (node === this.activeNode) return
+    this.activeNode = node
+    for (const session of [...this.sessions.values()]) {
+      this.closeData(session)
+      this.sessions.delete(session.leafId)
+      this.bySessionId.delete(session.sessionId)
+      this.readyLeaves.delete(session.leafId)
+      this.buffered.delete(session.leafId)
+      this.pendingReady.delete(session.leafId)
+      this.handlers.onState(session.leafId, 'disconnected')
+    }
+    if (!node) return
+    const cached = this.lastLists.get(node)
+    if (cached) this.syncFromList(cached, node)
+  }
+
+  get currentDevice(): string | null {
+    return this.activeNode
+  }
+
   async disconnect(): Promise<void> {
     // 先跟 relay 说一声「我主动走的」：它会让配对的另一端也断开。
     // 网络异常掉线不走这条消息，所以不会误伤别人。
@@ -246,6 +282,8 @@ export class RelayClient {
     this.pendingReady.clear()
     this.indexLeaves.clear()
     this.detached.clear()
+    this.activeNode = null
+    this.lastLists.clear()
     this.hostname = ''
     this.nodes = []
     this.agentOnline = false
@@ -561,6 +599,10 @@ export class RelayClient {
    */
   private syncFromList(raw: unknown, node = ''): void {
     if (!Array.isArray(raw)) return
+    // 没进入设备也要记下来：点进去的那一刻才有东西可挂。
+    this.lastLists.set(node, raw)
+    // 停在列表页、或者这条列表属于别的机器：只看不挂。
+    if (!this.activeNode || (node && node !== this.activeNode)) return
     const seen = new Set<string>()
     for (const item of raw) {
       if (!item || typeof item !== 'object') continue

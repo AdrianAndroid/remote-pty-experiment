@@ -128,6 +128,11 @@ function buildMenu(): void {
         },
         { type: 'separator' },
         {
+          label: '返回设备列表（终端继续跑）',
+          accelerator: 'CmdOrCtrl+Shift+E',
+          click: () => sendMenu('devices')
+        },
+        {
           label: '断开连接（可再连回）',
           accelerator: 'CmdOrCtrl+Shift+D',
           click: () => sendMenu('disconnect')
@@ -214,6 +219,10 @@ function registerIpc(): void {
   })
 
   ipcMain.handle(IpcChannel.RelayStatus, () => relay.status)
+
+  ipcMain.handle(IpcChannel.NodeActivate, async (_event, node: string | null) => {
+    await relay.setActiveNode(node ?? null)
+  })
 
   ipcMain.handle(IpcChannel.SessionCreate, async (_event, options) => {
     const result = await relay.create(

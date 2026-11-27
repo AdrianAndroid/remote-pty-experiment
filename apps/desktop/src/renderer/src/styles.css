@@ -783,3 +783,256 @@ code {
 .picker__cancel:hover {
   color: var(--text);
 }
+
+/* ---------------------------------------------------------------- 设备列表 */
+/* 连上中继后的第一屏：只列机器，不开任何终端通道。 */
+
+.devices {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg);
+}
+
+.devices__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg-side);
+}
+
+.devices__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.devices__logo {
+  font-size: 20px;
+  color: var(--accent);
+  line-height: 1;
+}
+
+.devices__brand strong {
+  display: block;
+  font-size: 13px;
+  letter-spacing: 0.4px;
+}
+
+.devices__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.devices__state::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.devices__state--on {
+  color: var(--green);
+}
+
+.devices__state--on::before {
+  background: var(--green);
+  box-shadow: 0 0 0 3px #6ecf8f22;
+}
+
+.devices__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.devices__ghost {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  background: transparent;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.devices__ghost:hover {
+  background: var(--bg-raise);
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+
+.devices__body {
+  flex: 1;
+  overflow: auto;
+  padding: 34px 22px 40px;
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.devices__title {
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.devices__hint {
+  margin: 0 0 22px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.devices__error {
+  margin-bottom: 16px;
+  padding: 9px 12px;
+  border: 1px solid #5a2a2a;
+  border-radius: var(--radius);
+  background: #241618;
+  color: var(--red);
+  font-size: 12px;
+}
+
+.devices__empty {
+  padding: 44px 0;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.devices__empty p {
+  margin: 0 0 8px;
+}
+
+.devices__empty-hint {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.devices__list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.devicecard {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 15px 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-side);
+  text-align: left;
+  transition: border-color 0.12s, background 0.12s, transform 0.12s;
+}
+
+.devicecard:hover:not(:disabled) {
+  border-color: var(--accent-dim);
+  background: var(--bg-raise);
+  transform: translateY(-1px);
+}
+
+.devicecard:disabled {
+  cursor: default;
+}
+
+.devicecard--off {
+  opacity: 0.55;
+}
+
+.devicecard__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 4px #6ecf8f1a;
+}
+
+.devicecard__dot--off {
+  background: var(--text-faint);
+  box-shadow: none;
+}
+
+.devicecard__main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.devicecard__name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.devicecard__badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #1d2a3f;
+  color: var(--accent);
+  font-size: 10px;
+  font-style: normal;
+  letter-spacing: 0.3px;
+}
+
+.devicecard__meta {
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+.devicecard__go {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.devicecard:hover:not(:disabled) .devicecard__go {
+  color: var(--accent);
+}
+
+/* 侧栏顶部「← 设备」：从设备回到列表，终端不动 */
+.backbtn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: left;
+}
+
+.backbtn:hover {
+  background: var(--bg-raise);
+  color: var(--text);
+}
+
+.backbtn__arrow {
+  color: var(--text-faint);
+}
+
+.backbtn kbd {
+  margin-left: auto;
+}
