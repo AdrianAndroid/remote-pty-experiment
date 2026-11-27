@@ -103,6 +103,8 @@ export interface RelayStatus {
   nodes?: NodeInfo[]
   /** 这个客户端自己的名字：首次运行生成，不删数据目录就不变 */
   clientName?: string
+  /** 本机主机名短名，用来在设备列表里认出“我这台机器”那条 */
+  selfHost?: string
   message?: string
 }
 

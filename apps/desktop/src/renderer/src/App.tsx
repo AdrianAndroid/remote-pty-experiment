@@ -17,7 +17,7 @@ import { SessionList, type SessionMeta } from './components/session-list'
 import { TerminalPane } from './components/terminal-pane'
 import { ConnectScreen } from './screens/connect'
 import { DevicesScreen } from './screens/devices'
-import { deviceLabel } from './lib/device-label'
+import { deviceLabel, prettyName } from './lib/device-label'
 
 const MAX_SESSIONS = 20
 
@@ -569,6 +569,17 @@ export default function App(): React.JSX.Element {
 
   const online = status.phase === 'online'
 
+  /**
+   * 「我」是谁：直接取设备列表里属于本机的那条（agent 上报的 hostname 与本机同名），
+   * 显示名字跟卡片完全一致 —— 不再给客户端单独编一个跟设备对不上的码。
+   * 本机没跑 agent 时退回主机短名。
+   */
+  const selfHost = (status.selfHost ?? '').toLowerCase()
+  const myDevice = (status.nodes ?? [])
+    .filter((item) => selfHost && prettyName(item.name).toLowerCase() === selfHost)
+    .sort((a, b) => Number(b.online) - Number(a.online) || b.sessions - a.sessions)[0]
+  const selfLabel = myDevice ? deviceLabel(myDevice) : (status.selfHost ?? '')
+
   // 中继连着、但还没选机器：停在设备列表。这一屏不为任何会话开数据通道。
   if (!detached && online && !activeNode) {
     return (
@@ -581,6 +592,7 @@ export default function App(): React.JSX.Element {
         onExitRelay={() => void handleDisconnect()}
         onReload={() => void window.rpty.getStatus().then(setStatus)}
         clientName={status.clientName}
+        selfLabel={selfLabel}
       />
     )
   }

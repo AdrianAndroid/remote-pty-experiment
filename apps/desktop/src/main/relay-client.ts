@@ -75,6 +75,8 @@ export class RelayClient {
   private phase: RelayStatus['phase'] = 'idle'
   private agentOnline = false
   private hostname = ''
+  /** 本机主机名短名（不参与连接，只给界面认“我这台”） */
+  private readonly selfHost = os.hostname().split('.')[0] || ''
   /** 当前在线的节点列表（多机）。单机时只有一项。 */
   private nodes: NodeInfo[] = []
   /** 本机节点标识，用来判断「本机共享」是否可用。默认取主机名短名。 */
@@ -128,7 +130,8 @@ export class RelayClient {
       agentOnline: this.agentOnline,
       hostname: this.hostname,
       nodes: this.nodes,
-      clientName: this.clientName
+      clientName: this.clientName,
+      selfHost: this.selfHost
     }
   }
 
@@ -140,6 +143,7 @@ export class RelayClient {
       hostname: this.hostname,
       nodes: this.nodes,
       clientName: this.clientName,
+      selfHost: this.selfHost,
       message
     })
   }
@@ -151,7 +155,9 @@ export class RelayClient {
       phase: this.phase,
       agentOnline: online,
       hostname: this.hostname,
-      nodes: this.nodes
+      nodes: this.nodes,
+      clientName: this.clientName,
+      selfHost: this.selfHost
     })
   }
 

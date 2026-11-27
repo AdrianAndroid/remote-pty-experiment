@@ -17,8 +17,10 @@ interface DevicesScreenProps {
   onPick: (node: string) => void
   onExitRelay: () => void
   onReload: () => void
-  /** 我这个客户端的名字（不卸载重装就不变） */
+  /** 我这个客户端的名字（不卸载重装就不变），放 title 里 */
   clientName?: string
+  /** 顶栏「我 ·」后面显示的名字：就是设备列表里“我这台机器”那条的名字 */
+  selfLabel?: string
 }
 
 export function DevicesScreen({
@@ -29,7 +31,8 @@ export function DevicesScreen({
   onPick,
   onExitRelay,
   onReload,
-  clientName = ''
+  clientName = '',
+  selfLabel = ''
 }: DevicesScreenProps): React.JSX.Element {
   const sorted = [...nodes].sort((a, b) => Number(b.online) - Number(a.online))
 
@@ -42,7 +45,11 @@ export function DevicesScreen({
             <strong>rpty</strong>
             <span className={online ? 'devices__state devices__state--on' : 'devices__state'}>
               {online ? '已连接中继' : '中继断开，正在重连…'}
-              {clientName && <span className="devices__me">我 · {clientName}</span>}
+              {selfLabel && (
+                <span className="devices__me" title={clientName ? `这台客户端：${clientName}` : undefined}>
+                  我 · {selfLabel}
+                </span>
+              )}
             </span>
           </div>
         </div>
