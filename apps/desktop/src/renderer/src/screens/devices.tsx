@@ -37,7 +37,11 @@ export function DevicesScreen({
   selfLabel = '',
   selfNode = ''
 }: DevicesScreenProps): React.JSX.Element {
-  const sorted = [...nodes].sort((a, b) => Number(b.online) - Number(a.online))
+  // 「我」永远排第一，其余按在线优先
+  const sorted = [...nodes].sort((a, b) => {
+    const selfDelta = Number(b.node === selfNode) - Number(a.node === selfNode)
+    return selfDelta || Number(b.online) - Number(a.online)
+  })
 
   return (
     <div className="devices">
