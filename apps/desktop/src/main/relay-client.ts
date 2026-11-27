@@ -56,6 +56,8 @@ export interface RelayHandlers {
   onError(code: string, message: string): void
   /** 会话归属变了（relay 告诉了我们谁是主人，或者别的窗口关了它）。 */
   onOwned(leafId: string, owned: boolean): void
+  /** PTY 尺寸变了：创建端改了窗口，镜像端得跟着锁到新尺寸。 */
+  onResized(leafId: string, cols: number, rows: number): void
   /** 整个节点的终端都没了（宿主退出 / 离线超时）：标签要真删掉，不是变灰。 */
   onRemoved(leafId: string): void
 }
@@ -389,6 +391,21 @@ export class RelayClient {
         break
       }
 
+      case 'SESSION_RESIZED': {
+        // 创建端改了窗口：PTY 行列变了，镜像端跟着换锁。
+        const sid = String(msg.session_id ?? '')
+        const session = this.bySessionId.get(sid)
+        if (!session) break
+        const cols = Number(msg.cols ?? 0)
+        const rows = Number(msg.rows ?? 0)
+        if (!cols || !rows) break
+        if (cols === session.cols && rows === session.rows) break
+        session.cols = cols
+        session.rows = rows
+        this.handlers.onResized(session.leafId, cols, rows)
+        break
+      }
+
       case 'SESSION_CLOSED': {
         // 创建端点了 ×：宿主上那块 PTY 已经没了，标签跟着消失。
         const sid = String(msg.session_id ?? '')
@@ -493,6 +510,26 @@ export class RelayClient {
         if (existing.owned !== owned) {
           existing.owned = owned
           this.handlers.onOwned(existing.leafId, owned)
+        }
+        // 创建端改过窗口：PTY 尺寸跟着变了，本端（镜像）要换锁，
+        // 否则还按老行列渲染，换行位置就和宿主对不上。
+        const cols = Number(entry.cols ?? 0) || existing.cols
+        const rows = Number(entry.rows ?? 0) || existing.rows
+        if (cols !== existing.cols || rows !== existing.rows) {
+          if (existing.owned) {
+            // 创建端才是尺寸权威：宿主记的和本地不一样，说明它被错误的值带偏了，
+            // 把本地的再发一次纠回来。
+            this.sendSignal({
+              type: 'SESSION_RESIZE',
+              session_id: existing.sessionId,
+              cols: existing.cols,
+              rows: existing.rows
+            })
+          } else {
+            existing.cols = cols
+            existing.rows = rows
+            this.handlers.onResized(existing.leafId, cols, rows)
+          }
         }
         // 列表里还有它，说明之前那次「消失」只是列表晚到，把假死拉回来。
         if (existing.state === 'exited') {
@@ -712,6 +749,9 @@ export class RelayClient {
     if (!session) return
     // 镜像端不改被控端的 PTY 尺寸：多端尺寸不同会互相拉扯，画面来回跳。
     if (!session.owned) return
+    // 窗口还没布局好时 fit() 会量出 10x5 这种鬼尺寸，发出去就把 PTY 压坏了，
+    // 之后所有端（包括创建端自己）都得按这个错尺寸排版，画面全乱。
+    if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols < 20 || rows < 5) return
     if (session.cols === cols && session.rows === rows) return
     session.cols = cols
     session.rows = rows

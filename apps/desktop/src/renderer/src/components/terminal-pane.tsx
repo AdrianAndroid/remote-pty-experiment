@@ -1,10 +1,16 @@
 /**
  * 单个终端面板。
  *
- * 关键点（都是踩过的坑）：
+ * 尺寸有两种模式，不能混：
+ *   - 创建端（没有 sizeLock）：PTY 跟着自己的窗口走，fit() 量出多少就是多少。
+ *   - 镜像端（有 sizeLock）：行列必须**严格等于** PTY 的行列，一律不 fit。
+ *     一旦行列不同，claude / top / vim 这类用绝对光标定位的 TUI 会整体错位，
+ *     屏幕上就是文字重叠、内容串行。容器装不下时用 CSS 等比缩放，
+ *     缩放不改变 xterm 内部度量，所以行列还是对的，只是字小一点。
+ *
+ * 其它踩过的坑：
  *   - 必须先 terminal.open() 再挂 WebGL，否则 addon 拿不到尺寸
- *   - 隐藏时不能 fit()，量出来是 0，会把 cols 打成 2
- *   - 切回时「移除 display:none → 等一帧 → fit → 挂 WebGL」，顺序不能换
+ *   - 隐藏时不能量尺寸，量出来是 0，会把 cols 打成 2
  *   - 隐藏时 detach WebGL，不然 20 个会话会各自持有 GPU 上下文，很快就崩
  */
 
@@ -22,10 +28,7 @@ interface TerminalPaneProps {
   active: boolean
   /** 只读：画面照常刷新，但键盘输入被吃掉，不发给被控端 */
   readOnly?: boolean
-  /**
-   * 镜像端专用：把 xterm 锁到 PTY 的 cols/rows。
-   * 不锁的话本地 fit 会按窗口宽度重排，而 PTY 仍按老宽度换行，画面就会错行。
-   */
+  /** 镜像端专用：把 xterm 锁到 PTY 的 cols/rows */
   sizeLock?: { cols: number; rows: number }
 }
 
@@ -36,6 +39,7 @@ export function TerminalPane({
   sizeLock
 }: TerminalPaneProps): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null)
+  const wrapRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const webglRef = useRef<WebglAddon | null>(null)
@@ -71,26 +75,48 @@ export function TerminalPane({
     }
   }, [])
 
-  const applyFit = useCallback(() => {
+  const applyLayout = useCallback(() => {
     const term = termRef.current
-    const fit = fitRef.current
-    if (!term || !fit) return
-    try {
-      fit.fit()
-    } catch {
-      // 容器还没量到尺寸，等 ResizeObserver 再来一次。
+    const wrap = wrapRef.current
+    const host = hostRef.current
+    if (!term || !wrap || !host) return
+
+    if (!sizeLock) {
+      // 创建端：窗口多大，PTY 就多大。
+      const fit = fitRef.current
+      if (!fit) return
+      // 还没布局（隐藏的标签页 / 窗口刚起）：量出来是 0，fit 会给个荒唐的行列，
+      // 一发出去 PTY 就被压成 10 列，画面全错。等真正可见那一次再量。
+      if (host.offsetWidth < 40 || host.offsetHeight < 40) return
+      wrap.style.transform = 'none'
+      try {
+        fit.fit()
+      } catch {
+        // 容器还没量到尺寸，等 ResizeObserver 再来一次。
+      }
       return
     }
-    if (sizeLock && (term.cols !== sizeLock.cols || term.rows !== sizeLock.rows)) {
-      // 拉回 PTY 的真实尺寸：宁可右侧留白，也不能让换行位置和 shell 不一致。
+
+    // 镜像端：行列只认 PTY，不 fit。
+    if (term.cols !== sizeLock.cols || term.rows !== sizeLock.rows) {
       term.resize(sizeLock.cols, sizeLock.rows)
     }
+
+    const screen = wrap.querySelector('.xterm-screen') as HTMLElement | null
+    if (!screen) return
+    const hr = host.getBoundingClientRect()
+    const sw = screen.offsetWidth
+    const sh = screen.offsetHeight
+    if (!hr.width || !hr.height || !sw || !sh) return
+    // 容器装不下（对方窗口更大）：整体等比缩小，别裁掉下半截。
+    const scale = Math.min(1, hr.width / sw, hr.height / sh)
+    wrap.style.transform = scale < 0.995 ? `scale(${scale.toFixed(4)})` : 'none'
   }, [sizeLock])
 
   // 创建实例，只在 leafId 变化时重建。
   useEffect(() => {
-    const host = hostRef.current
-    if (!host) return
+    const wrap = wrapRef.current
+    if (!wrap) return
 
     const term = new Terminal(TERMINAL_OPTIONS)
     const fit = new FitAddon()
@@ -107,7 +133,7 @@ export function TerminalPane({
     term.loadAddon(new WebLinksAddon())
 
     // open 必须早于 WebGL attach。
-    term.open(host)
+    term.open(wrap)
 
     termRef.current = term
     fitRef.current = fit
@@ -116,14 +142,8 @@ export function TerminalPane({
     term.onData((data) => window.rpty.write(leafId, data))
     term.onResize(({ cols, rows }) => window.rpty.resize(leafId, cols, rows))
 
-    try {
-      fit.fit()
-      if (sizeLock && (term.cols !== sizeLock.cols || term.rows !== sizeLock.rows)) {
-        term.resize(sizeLock.cols, sizeLock.rows)
-      }
-    } catch {
-      // 容器刚挂载，量不到尺寸，等 ResizeObserver 兜底。
-    }
+    // 首帧先按 PTY 尺寸铺好（镜像端），创建端交给 fit。
+    applyLayout()
 
     const offData = window.rpty.onData(({ leafId: incoming, data }) => {
       if (incoming === leafId) term.write(data)
@@ -132,15 +152,27 @@ export function TerminalPane({
     // 订阅建好之后再通知主进程「可以灌了」，这样攒住的快照和增量才有人接。
     window.rpty.ready(leafId)
 
-    const observer = new ResizeObserver(() => {
+    const host = hostRef.current
+    // 窗口拖拽/最大化过程中会连续量到中间尺寸，等一帧再算，
+    // 否则会按一个偏小的容器算出缩放比例，之后就卡在那儿不动了。
+    let pending = 0
+    const schedule = (): void => {
       if (!active) return
-      applyFit()
-    })
-    observer.observe(host)
+      if (pending) cancelAnimationFrame(pending)
+      pending = requestAnimationFrame(() => {
+        pending = 0
+        applyLayout()
+      })
+    }
+    const observer = new ResizeObserver(schedule)
+    if (host) observer.observe(host)
+    window.addEventListener('resize', schedule)
 
     return () => {
       offData()
       observer.disconnect()
+      window.removeEventListener('resize', schedule)
+      if (pending) cancelAnimationFrame(pending)
       detachWebgl()
       term.dispose()
       termRef.current = null
@@ -163,7 +195,14 @@ export function TerminalPane({
     }
   }, [readOnly, active])
 
-  // 可见性切换：attach/detach WebGL + 延迟一帧 fit。
+  // PTY 尺寸变了（创建端改了窗口）：重新按新行列铺。
+  useEffect(() => {
+    if (!active) return
+    const raf = requestAnimationFrame(() => applyLayout())
+    return () => cancelAnimationFrame(raf)
+  }, [sizeLock?.cols, sizeLock?.rows, active, applyLayout])
+
+  // 可见性切换：attach/detach WebGL + 延迟一帧排版。
   useEffect(() => {
     if (!active) {
       detachWebgl()
@@ -171,12 +210,12 @@ export function TerminalPane({
     }
 
     const raf = requestAnimationFrame(() => {
-      applyFit()
+      applyLayout()
       attachWebgl()
       if (!readOnly) termRef.current?.focus()
     })
     return () => cancelAnimationFrame(raf)
-  }, [active, attachWebgl, detachWebgl, applyFit, readOnly])
+  }, [active, attachWebgl, detachWebgl, applyLayout, readOnly])
 
   return (
     <div
@@ -191,7 +230,9 @@ export function TerminalPane({
       }
       aria-hidden={!active}
     >
-      <div ref={hostRef} className="pane__host" />
+      <div ref={hostRef} className="pane__host">
+        <div ref={wrapRef} className="pane__wrap" />
+      </div>
     </div>
   )
 }

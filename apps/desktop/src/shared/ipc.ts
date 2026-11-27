@@ -41,6 +41,8 @@ export const IpcChannel = {
   SessionOwned: 'session:owned',
   /** 主 -> 渲染：整个节点的终端都没了（宿主退出 / 离线超时），把标签一起摘掉 */
   SessionRemoved: 'session:removed',
+  /** 主 -> 渲染：PTY 尺寸变了（创建端改了窗口），镜像端要跟着锁到新尺寸 */
+  SessionResized: 'session:resized',
   SessionData: 'session:data',
   SessionStateChanged: 'session:state',
   SessionExit: 'session:exit',
@@ -130,6 +132,12 @@ export interface SessionAdoptedPayload {
   node?: string
 }
 
+export interface SessionResizedPayload {
+  leafId: string
+  cols: number
+  rows: number
+}
+
 export interface SessionExitPayload {
   leafId: string
   exitCode?: number
@@ -166,6 +174,7 @@ export interface RptyBridge {
   onAdopted(handler: (payload: SessionAdoptedPayload) => void): () => void
   onOwned(handler: (payload: { leafId: string; owned: boolean }) => void): () => void
   onRemoved(handler: (payload: { leafId: string }) => void): () => void
+  onResized(handler: (payload: SessionResizedPayload) => void): () => void
   onStatus(handler: (payload: RelayStatus) => void): () => void
   onError(handler: (payload: RelayErrorPayload) => void): () => void
   onMenu(handler: (command: MenuCommand, arg?: number) => void): () => void

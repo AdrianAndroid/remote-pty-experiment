@@ -131,6 +131,13 @@ export default function App(): React.JSX.Element {
       })
     })
 
+    // 创建端改了窗口：PTY 行列变了，镜像端要换锁，否则换行位置对不上。
+    const offResized = window.rpty.onResized(({ leafId, cols, rows }) => {
+      setSessions((prev) =>
+        prev.map((item) => (item.id === leafId ? { ...item, cols, rows } : item))
+      )
+    })
+
     const offError = window.rpty.onError(({ code, message }) => {
       setError(message ? `${message}（${code}）` : code)
     })
@@ -144,6 +151,7 @@ export default function App(): React.JSX.Element {
       offAdopted()
       offOwned()
       offRemoved()
+      offResized()
       offError()
       offReadOnly()
     }

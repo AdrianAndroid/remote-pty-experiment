@@ -351,6 +351,29 @@ class Relay:
             {"type": "NODES", "nodes": [n.summary() for n in self.nodes.values()]}
         )
 
+    def _apply_resize_to_lists(self, sid: str, cols: int, rows: int) -> None:
+        """创建端改了窗口：把新尺寸写回缓存列表。
+
+        不然新连上的客户端会拿旧行列去锁 xterm，换行位置和宿主对不上，
+        窗口大小不一样时画面还会溢出容器。
+        """
+        for node in self.nodes.values():
+            cached = node.last_list
+            if not isinstance(cached, dict):
+                continue
+            sessions = cached.get("sessions")
+            if not isinstance(sessions, list):
+                continue
+            changed = False
+            next_sessions = []
+            for item in sessions:
+                if str((item or {}).get("session_id") or "") == sid:
+                    item = {**item, "cols": cols, "rows": rows}
+                    changed = True
+                next_sessions.append(item)
+            if changed:
+                node.last_list = {**cached, "sessions": next_sessions}
+
     def _drop_from_lists(self, sid: str) -> None:
         """把某个会话从各节点的缓存列表里摘掉。
 
@@ -604,6 +627,30 @@ class Relay:
                             # 镜像端不改 PTY 尺寸，否则两端会互相拉扯、画面来回跳。
                             LOG.debug("忽略非 owner 的 resize sid=%s", sid[:8])
                             continue
+
+                    if msg_type == "SESSION_RESIZE":
+                        # 尺寸只由创建端决定。转给宿主的同时广播给其它控制端，
+                        # 让镜像端立刻换锁，不用等下一份 SESSION_LIST。
+                        try:
+                            new_cols = int(msg.get("cols") or 0)
+                            new_rows = int(msg.get("rows") or 0)
+                        except (TypeError, ValueError):
+                            new_cols = new_rows = 0
+                        if new_cols < 20 or new_rows < 5:
+                            # 客户端还没布局时量出的荒唐尺寸，别把 PTY 压坏。
+                            LOG.warning("丢弃异常 resize %sx%s sid=%s", new_cols, new_rows, sid[:8])
+                            continue
+                        if sid and new_cols >= 20 and new_rows >= 5:
+                            self._apply_resize_to_lists(sid, new_cols, new_rows)
+                            await self.broadcast_ctls(
+                                {
+                                    "type": "SESSION_RESIZED",
+                                    "session_id": sid,
+                                    "node": node.node_id,
+                                    "cols": new_cols,
+                                    "rows": new_rows,
+                                }
+                            )
 
                     if msg_type == "SESSION_CLOSE":
                         closed_sid = str(msg.get("session_id") or "")
