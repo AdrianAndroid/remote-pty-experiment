@@ -1058,3 +1058,14 @@ code {
   font-family: 'SF Mono', Menlo, monospace;
   font-size: 10.5px;
 }
+
+/* 我自己这台机器的 agent：标「我」，不给进 */
+.devicecard--self {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
+.devicecard__badge--me {
+  background: rgba(90, 155, 255, 0.16);
+  color: #7fb0ff;
+}

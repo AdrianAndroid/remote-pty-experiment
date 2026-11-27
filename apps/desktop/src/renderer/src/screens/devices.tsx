@@ -21,6 +21,8 @@ interface DevicesScreenProps {
   clientName?: string
   /** 顶栏「我 ·」后面显示的名字：就是设备列表里“我这台机器”那条的名字 */
   selfLabel?: string
+  /** 我自己这条设备的 node id：标「我」，并且不给进（自己进自己没有意义） */
+  selfNode?: string
 }
 
 export function DevicesScreen({
@@ -32,7 +34,8 @@ export function DevicesScreen({
   onExitRelay,
   onReload,
   clientName = '',
-  selfLabel = ''
+  selfLabel = '',
+  selfNode = ''
 }: DevicesScreenProps): React.JSX.Element {
   const sorted = [...nodes].sort((a, b) => Number(b.online) - Number(a.online))
 
@@ -80,17 +83,28 @@ export function DevicesScreen({
           </div>
         ) : (
           <ul className="devices__list">
-            {sorted.map((node) => (
+            {sorted.map((node) => {
+              // 我自己这台机器的 agent：标「我」，不给进 —— 自己不需要从自己这儿连回去
+              const isSelf = !!selfNode && node.node === selfNode
+              return (
               <li key={node.node}>
                 <button
                   type="button"
-                  className={node.online ? 'devicecard' : 'devicecard devicecard--off'}
-                  disabled={!node.online || !online || busy}
+                  className={
+                    isSelf
+                      ? 'devicecard devicecard--self'
+                      : node.online
+                        ? 'devicecard'
+                        : 'devicecard devicecard--off'
+                  }
+                  disabled={isSelf || !node.online || !online || busy}
                   onClick={() => onPick(node.node)}
                   title={
-                    node.online
-                      ? `进入 ${deviceLabel(node)}`
-                      : `${deviceLabel(node)} 当前离线，连不进去`
+                    isSelf
+                      ? `${deviceLabel(node)} 就是这台电脑，不用从这里进`
+                      : node.online
+                        ? `进入 ${deviceLabel(node)}`
+                        : `${deviceLabel(node)} 当前离线，连不进去`
                   }
                 >
                   <span className={node.online ? 'devicecard__dot' : 'devicecard__dot devicecard__dot--off'} />
@@ -100,15 +114,17 @@ export function DevicesScreen({
                       <em className="devicecard__badge devicecard__badge--id">
                         {deviceLabelParts(node).code}
                       </em>
+                      {isSelf && <em className="devicecard__badge devicecard__badge--me">我</em>}
                     </span>
                     <span className="devicecard__meta">
                       {node.online ? `${node.sessions} 个终端` : '离线'}
                     </span>
                   </span>
-                  <span className="devicecard__go">{node.online ? '进入 →' : ''}</span>
+                  {!isSelf && <span className="devicecard__go">{node.online ? '进入 →' : ''}</span>}
                 </button>
               </li>
-            ))}
+              )
+            })}
           </ul>
         )}
       </div>

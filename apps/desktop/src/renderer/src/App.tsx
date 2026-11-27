@@ -579,6 +579,8 @@ export default function App(): React.JSX.Element {
     .filter((item) => selfHost && prettyName(item.name).toLowerCase() === selfHost)
     .sort((a, b) => Number(b.online) - Number(a.online) || b.sessions - a.sessions)[0]
   const selfLabel = myDevice ? deviceLabel(myDevice) : (status.selfHost ?? '')
+  /** 标「我」并禁止进入的那条：就是我所在的这台机器的 agent */
+  const selfNode = myDevice?.node ?? ''
 
   // 中继连着、但还没选机器：停在设备列表。这一屏不为任何会话开数据通道。
   if (!detached && online && !activeNode) {
@@ -593,6 +595,7 @@ export default function App(): React.JSX.Element {
         onReload={() => void window.rpty.getStatus().then(setStatus)}
         clientName={status.clientName}
         selfLabel={selfLabel}
+        selfNode={selfNode}
       />
     )
   }
