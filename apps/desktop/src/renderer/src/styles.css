@@ -1040,3 +1040,11 @@ code {
 .backbtn kbd {
   margin-left: auto;
 }
+
+/* 同名设备（同机多开 agent）的 id 尾段 */
+.devicecard__badge--id {
+  background: #2a2118;
+  color: var(--amber);
+  font-family: 'SF Mono', Menlo, monospace;
+  letter-spacing: 0;
+}

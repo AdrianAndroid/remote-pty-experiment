@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import pty
+import secrets
 import signal
 import socket
 import struct
@@ -240,14 +241,69 @@ class Session:
         self._finish("closed")
 
 
+DEFAULT_STATE = os.path.expanduser("~/.rpty/agent.json")
+
+
+def state_path() -> str:
+    """状态文件位置：默认 ~/.rpty/agent.json，可用 RPTY_STATE 指到别处（同机多开用）。"""
+    return os.path.expanduser(os.environ.get("RPTY_STATE", DEFAULT_STATE))
+
+
+def load_state() -> Dict[str, Any]:
+    try:
+        with open(state_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state: Dict[str, Any]) -> None:
+    path = state_path()
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        LOG.warning("状态文件写不进去：%s（本次名字只活在内存里）", path)
+
+
+def resolve_identity(hostname: str, node_arg: str = "", name_arg: str = "") -> tuple[str, str]:
+    """
+    给自己定一个名字，并保证下次还是它。
+
+    优先级：命令行 --node / --name > 状态文件 > 现生成。
+    生成规则 `<主机名短名>-<4 位 hex>`：同机多开天然不撞，也不用记命令。
+    """
+    state = load_state()
+    node = (node_arg or state.get("node") or "").strip()
+    name = (name_arg or state.get("name") or "").strip()
+    if not node:
+        short = hostname.split(".")[0] or "node"
+        node = f"{short}-{secrets.token_hex(2)}"
+        LOG.info("第一次启动，生成本机节点标识 %s（以后一直用它）", node)
+    if not name:
+        name = hostname
+    if state.get("node") != node or state.get("name") != name:
+        state["node"] = node
+        state["name"] = name
+        state.setdefault("created_at", int(time.time()))
+        save_state(state)
+    return node, name
+
+
 class Agent:
-    def __init__(self, relay: str, token: str, node_id: str = "") -> None:
+    def __init__(self, relay: str, token: str, node_id: str = "", name: str = "") -> None:
         self.relay = relay.rstrip("/")
         self.token = token
         self.sessions: Dict[str, Session] = {}
         self.hostname = socket.gethostname()
         # 节点标识：relay 用它区分多台被控机。默认取主机名，重名就手动指定。
         self.node_id = node_id or self.hostname.split(".")[0] or "default"
+        # 显示名和节点标识分开：名字给人看，id 给程序认（重连后都不变）
+        self.name = name or self.node_id
         self.tasks: Dict[str, asyncio.Task] = {}
         self.ws: Optional[Any] = None
         self.backoff = 1.0
@@ -293,7 +349,7 @@ class Agent:
                 {
                     "type": "HELLO",
                     "node_id": self.node_id,
-                    "name": self.hostname,
+                    "name": self.name,
                     "platform": sys.platform,
                 }
             )
@@ -313,7 +369,7 @@ class Agent:
         payload = {
             "type": "SESSION_LIST",
             "node": self.node_id,
-            "hostname": self.hostname,
+            "hostname": self.name,
             "platform": sys.platform,
             "sessions": [
                 {
@@ -523,8 +579,13 @@ async def amain() -> None:
     parser.add_argument("--log-level", default="INFO")
     parser.add_argument(
         "--node",
-        default=os.environ.get("RPty_NODE", ""),
-        help="节点标识，默认取主机名短名。多台机器必须唯一",
+        default=os.environ.get("RPTY_NODE", ""),
+        help="节点标识；不给就沿用上次生成的，首次启动自动生成 <主机名>-<4hex>",
+    )
+    parser.add_argument(
+        "--name",
+        default=os.environ.get("RPTY_NAME", ""),
+        help="界面显示名；不给就用状态文件里的，再没有就用主机名",
     )
     args = parser.parse_args()
 
@@ -536,7 +597,8 @@ async def amain() -> None:
     if not args.relay or not args.token:
         sys.exit("启动失败：需要 --relay 与 --token（或 RPty_RELAY / RPty_TOKEN）")
 
-    agent = Agent(args.relay, args.token, args.node)
+    node_id, node_name = resolve_identity(socket.gethostname(), args.node, args.name)
+    agent = Agent(args.relay, args.token, node_id, node_name)
 
     loop = asyncio.get_running_loop()
     stop = loop.create_future()

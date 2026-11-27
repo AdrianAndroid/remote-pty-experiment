@@ -32,6 +32,11 @@ export function DevicesScreen({
   onReload
 }: DevicesScreenProps): React.JSX.Element {
   const sorted = [...nodes].sort((a, b) => Number(b.online) - Number(a.online))
+  // 同一台机器跑多个 agent 时显示名会一样，靠 id 尾段区分；名字唯一时不显示，保持干净
+  const nameCount = new Map<string, number>()
+  for (const node of sorted) nameCount.set(node.name, (nameCount.get(node.name) ?? 0) + 1)
+  // 只认「-<4 位 hex>」这种自动生成的后缀；人工起的节点名（如主机名本身）不硬拆
+  const tail = (id: string): string => /-([0-9a-f]{4})$/.exec(id)?.[1] ?? ''
 
   return (
     <div className="devices">
@@ -89,11 +94,16 @@ export function DevicesScreen({
                   <span className="devicecard__main">
                     <span className="devicecard__name">
                       {pretty(node.name)}
+                      {(nameCount.get(node.name) ?? 0) > 1 && tail(node.node) && (
+                        <em className="devicecard__badge devicecard__badge--id">{tail(node.node)}</em>
+                      )}
                       {node.local && <em className="devicecard__badge">本机</em>}
                     </span>
                     <span className="devicecard__meta">
                       {node.online ? `${node.sessions} 个终端` : '离线'}
-                      {pretty(node.node) !== pretty(node.name) && ` · ${node.node}`}
+                      {pretty(node.node) !== pretty(node.name) &&
+                        (nameCount.get(node.name) ?? 0) > 1 &&
+                        ` · ${node.node}`}
                     </span>
                   </span>
                   <span className="devicecard__go">{node.online ? '进入 →' : ''}</span>
