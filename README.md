@@ -58,9 +58,10 @@
 | [docs/08-bold-design.md](docs/08-bold-design.md) | 大胆设计：盲中继 + 多路复用 + Session Broker |
 | [docs/09-architecture-diagram.md](docs/09-architecture-diagram.md) | 架构图集（三端全景 / 分层栈 / 时序 / 帧结构） |
 | [docs/10-symmetric-peer.md](docs/10-symmetric-peer.md) | **对称 Peer 设计：双向、无固定角色**（取代 02 的角色模型） |
+| [docs/11-relay-design.md](docs/11-relay-design.md) | **Relay 服务端设计**：在线表、DIAL 信令、桥接、限流、代码骨架 |
 | [openspec/](openspec/) | 需求规格与变更（本项目所有功能变更必须先立 OpenSpec change） |
 
-> 阅读顺序建议：`01 → 02 → 03 → 08 → 10 → 09`。
+> 阅读顺序建议：`01 → 02 → 03 → 08 → 10 → 11 → 09`。
 > `02` / `03` 中关于固定角色（agent / terminal）的部分已被 `10` 取代，其余内容仍然有效。
 
 ---
