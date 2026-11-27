@@ -175,6 +175,8 @@ export interface SessionAdoptedPayload {
   index: number
   /** 这个会话属于哪个节点 */
   node?: string
+  /** 这个会话属于哪个客户端（client id）：每个客户端各看各的桌面 */
+  owner?: string
 }
 
 export interface SessionResizedPayload {

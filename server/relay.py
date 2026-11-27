@@ -735,6 +735,11 @@ class Relay:
                             LOG.debug("发号 sid=%s index=%s known=%s src=%s", sid[:8], msg["index"], known, msg_type)
                             self.sid_node[sid] = node.node_id
                             client_id = self.ctl_client.get(ws, "")
+                            # 我正在别人客户端里开终端：这个 PTY 属于那张桌面，
+                            # 否则它会挂在我名下、对方那边看不见。
+                            pair = self.pairs.get(client_id) or {}
+                            if pair.get("to"):
+                                client_id = pair["to"]
                             if client_id:
                                 self.sid_owner.setdefault(sid, client_id)
                         if token:

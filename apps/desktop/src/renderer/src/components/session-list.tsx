@@ -14,6 +14,8 @@ export interface SessionMeta {
   state: SessionState
   /** true = 本窗口建的终端；false = 别的窗口建的，这里只是镜像 */
   owned: boolean
+  /** 这个终端属于哪个客户端（谁的桌面）。界面按它分桌面，各看各的 */
+  owner?: string
   /** PTY 语言尺寸，镜像端据此锁死 xterm，避免换行错位 */
   cols?: number
   rows?: number

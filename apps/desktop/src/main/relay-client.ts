@@ -110,6 +110,8 @@ interface RemoteSession {
   owned: boolean
   /** 这个 PTY 跑在哪个节点上 */
   node: string
+  /** 这个 PTY 属于哪个客户端（谁的桌面）：界面按它分桌面，各看各的 */
+  owner: string
   /** 本端第一次看到这个会话的时间。列表还没回来时不急着判它死了。 */
   createdAt: number
 }
@@ -126,7 +128,8 @@ export interface RelayHandlers {
     rows: number,
     owned: boolean,
     index: number,
-    node: string
+    node: string,
+    owner: string
   ): void
   onError(code: string, message: string): void
   /** 会话归属变了（relay 告诉了我们谁是主人，或者别的窗口关了它）。 */
@@ -915,6 +918,7 @@ export class RelayClient {
       dataTimer: null,
       pending: [],
       owned: this.isMine(sessionId, ownerId),
+      owner: ownerId || this.clientId,
       node,
       createdAt: Date.now()
     }
@@ -922,7 +926,16 @@ export class RelayClient {
     this.bySessionId.set(sessionId, session)
     if (this.pendingReady.delete(leafId)) this.markReady(leafId)
     this.indexLeaves.set(sessionId, index)
-    this.handlers.onAdopted(leafId, sessionId, cols, rows, session.owned, index, node)
+    this.handlers.onAdopted(
+      leafId,
+      sessionId,
+      cols,
+      rows,
+      session.owned,
+      index,
+      node,
+      session.owner
+    )
     this.openData(session)
   }
 
@@ -968,6 +981,8 @@ export class RelayClient {
       dataTimer: null,
       pending: [],
       owned: true,
+      // 我在别人客户端里开终端 = 开在对方桌面上（relay 也是这么记的）
+      owner: this.pairedClient ?? this.clientId,
       node: nodeId,
       createdAt: Date.now()
     }
@@ -1089,6 +1104,7 @@ export class RelayClient {
     cols: number
     rows: number
     owned: boolean
+    owner: string
     index: number
   }> {
     return [...this.sessions.values()]
@@ -1099,6 +1115,7 @@ export class RelayClient {
         cols: session.cols,
         rows: session.rows,
         owned: session.owned,
+        owner: session.owner,
         index: this.indexLeaves.get(session.sessionId) ?? 0,
         node: session.node
       }))

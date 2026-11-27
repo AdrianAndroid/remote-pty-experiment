@@ -5,7 +5,7 @@
  * display 状态，xterm 实例不能重建 —— 重建会丢掉回滚缓冲和正在跑的程序。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   ConfigInfo,
   MenuCommand,
@@ -92,6 +92,8 @@ export default function App(): React.JSX.Element {
   const [activeNode, setActiveNode] = useState<string | null>(null)
   /** 我进的是哪个客户端（同机多客户端时，宿主 node 可能一样，名字要按客户端算） */
   const [activeClientId, setActiveClientId] = useState<string | null>(null)
+  /** 上面那个的 ref：进/离开要在 await 之前就落值 */
+  const activeClientRef = useRef<string | null>(null)
   /** leaveDevice 的 ref：键盘菜单回调注册在它定义之前 */
   const leaveDeviceRef = useRef<() => Promise<void>>(async () => {})
   /** client id -> 名字快照：对方掉线后名字没了，提示里还得能叫出它 */
@@ -116,6 +118,9 @@ export default function App(): React.JSX.Element {
   /** 我认领的宿主 node id：只有它的标签才落盘 */
   const ownHostRef = useRef('')
   ownHostRef.current = ownHostNode
+  /** 我自己的 client id：判断"这张桌面是不是我的"，决定标签要不要落盘 */
+  const myClientIdRef = useRef('')
+  myClientIdRef.current = status.clientId ?? ''
   /** 进设备时要从存储里选回来的那个 sessionId（只生效一次） */
   const pendingActiveRef = useRef<string | null>(null)
   const activeIdRef = useRef<string | null>(null)
@@ -134,9 +139,9 @@ export default function App(): React.JSX.Element {
    * 那种空白不能覆盖掉上次的记录。
    */
   const persistTabs = useCallback(() => {
-    const node = activeNodeRef.current
-    // 只维护自己宿主上的标签：进别人的客户端看到的是对方的终端，不是"我的"，不落盘
-    if (!node || node !== ownHostRef.current || sessionsRef.current.length === 0) return
+    // 只维护自己桌面上的标签：进别人的客户端看到的是对方的终端，不落盘
+    const key = activeClientRef.current
+    if (!key || key !== myClientIdRef.current || sessionsRef.current.length === 0) return
     const items = sessionsRef.current
       .filter((item) => item.sessionId)
       .map((item, index) => ({
@@ -146,7 +151,7 @@ export default function App(): React.JSX.Element {
       }))
     if (items.length === 0) return
     const store = readTabStore()
-    store[node] = {
+    store[key] = {
       active:
         sessionsRef.current.find((item) => item.id === activeIdRef.current)?.sessionId ?? null,
       items
@@ -157,11 +162,12 @@ export default function App(): React.JSX.Element {
   /** 把主进程的会话快照合进标签列（按 leafId 去重，可以反复调）。 */
   const applySnapshot = useCallback((list: SessionAdoptedPayload[]) => {
     if (!Array.isArray(list) || list.length === 0) return
-    autoCreatedRef.current = true
+    const view = activeClientRef.current ?? ''
+    autoCreatedRef.current = list.some((item) => !item.owner || !view || item.owner === view)
     // 上次这个设备留下的标题 / 顺序 / 选中，按 sessionId 对回去
     const saved =
-      activeNodeRef.current && activeNodeRef.current === ownHostRef.current
-        ? readTabStore()[activeNodeRef.current]
+      activeClientRef.current && activeClientRef.current === myClientIdRef.current
+        ? readTabStore()[activeClientRef.current]
         : undefined
     const savedById = new Map((saved?.items ?? []).map((item) => [item.sessionId, item]))
     setSessions((prev) => {
@@ -179,6 +185,7 @@ export default function App(): React.JSX.Element {
             order: old?.order ?? item.index,
             state: 'active' as const,
             owned: item.owned,
+            owner: item.owner,
             cols: item.cols,
             rows: item.rows,
             node: item.node
@@ -231,13 +238,14 @@ export default function App(): React.JSX.Element {
 
     // 被控端上已有会话（另一个客户端开的）：不新建，直接挂上去镜像同一块终端。
     const offAdopted = window.rpty.onAdopted(
-      ({ leafId, sessionId, owned, index, cols, rows, node }) => {
+      ({ leafId, sessionId, owned, index, cols, rows, node, owner }) => {
         setSessions((prev) => {
           if (prev.some((item) => item.id === leafId)) return prev
-          autoCreatedRef.current = true
+          const view = activeClientRef.current ?? ''
+          if (!owner || !view || owner === view) autoCreatedRef.current = true
           if (index > seqRef.current) seqRef.current = index
           // 同一个 PTY 上次摆在哪、叫什么，按 sessionId 找回来
-          const saved = readTabStore()[node ?? activeNodeRef.current ?? '']?.items.find(
+          const saved = readTabStore()[owner || activeClientRef.current || '']?.items.find(
             (item) => item.sessionId === sessionId
           )
           const title = saved?.title ?? `终端 ${index || ++seqRef.current}`
@@ -254,6 +262,7 @@ export default function App(): React.JSX.Element {
               order,
               state: 'active' as const,
               owned,
+              owner,
               cols,
               rows,
               node
@@ -347,6 +356,7 @@ export default function App(): React.JSX.Element {
    */
   const handleDisconnect = useCallback(async () => {
     setError('')
+    ownEnteredRef.current = false
     try {
       await window.rpty.disconnect()
     } catch (err) {
@@ -405,7 +415,18 @@ export default function App(): React.JSX.Element {
     // 各自走自己的 IPC，不会因为上一发还没回来就被吃掉。
     setSessions((prev) => {
       const maxOrder = prev.reduce((max, item) => Math.max(max, item.order ?? -1), -1)
-      return [...prev, { id: leafId, title, state: 'connecting', owned: true, node: target, order: maxOrder + 1 }]
+      return [
+        ...prev,
+        {
+          id: leafId,
+          title,
+          state: 'connecting',
+          owned: true,
+          owner: activeClientRef.current ?? myClientIdRef.current,
+          node: target,
+          order: maxOrder + 1
+        }
+      ]
     })
     setActiveId(leafId)
     const result = await window.rpty.create({ leafId, cols, rows, target })
@@ -439,6 +460,17 @@ export default function App(): React.JSX.Element {
     void createSession(node)
   }, [createSession])
 
+  // 一张桌面一套终端：我站在谁的客户端里，就只看那个客户端的终端。
+  // 老的、没带 owner 的行照旧显示，免得历史会话突然消失。
+  const viewClientId = activeClientId ?? status.clientId ?? ''
+  const visibleSessions = useMemo(
+    () =>
+      sessions.filter(
+        (item) => !item.owner || !viewClientId || item.owner === viewClientId
+      ),
+    [sessions, viewClientId]
+  )
+
   const closeSession = useCallback(
     async (leafId: string) => {
       await window.rpty.close(leafId)
@@ -459,21 +491,21 @@ export default function App(): React.JSX.Element {
 
   const stepTab = useCallback(
     (delta: number) => {
-      if (sessions.length === 0) return
-      const current = sessions.findIndex((item) => item.id === activeIdRef.current)
+      if (visibleSessions.length === 0) return
+      const current = visibleSessions.findIndex((item) => item.id === activeIdRef.current)
       const base = current < 0 ? 0 : current
-      const next = (base + delta + sessions.length) % sessions.length
-      setActiveId(sessions[next].id)
+      const next = (base + delta + visibleSessions.length) % visibleSessions.length
+      setActiveId(visibleSessions[next].id)
     },
-    [sessions]
+    [visibleSessions]
   )
 
   const gotoTab = useCallback(
     (index: number) => {
-      const target = sessions[index]
+      const target = visibleSessions[index]
       if (target) setActiveId(target.id)
     },
-    [sessions]
+    [visibleSessions]
   )
 
   // 连上且被控端在线但没有终端时，自动开一个。
@@ -487,14 +519,17 @@ export default function App(): React.JSX.Element {
     if (status.phase !== 'online' || !device?.online) return
     const timer = setTimeout(() => {
       if (autoCreatedRef.current) return
-      if (sessionsRef.current.length > 0) return
+      const mine = sessionsRef.current.filter(
+        (item) => !item.owner || !viewClientId || item.owner === viewClientId
+      )
+      if (mine.length > 0) return
       autoCreatedRef.current = true
       // 必须指名设备：不传 target 主进程会拒绝（它不替你猜机器）
       void createSession(activeNodeRef.current ?? undefined)
     }, 700)
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status.phase, status.nodes, sessions.length, activeNode])
+  }, [status.phase, status.nodes, sessions.length, activeNode, viewClientId])
 
   // ---------------------------------------------------------- 菜单与快捷键
 
@@ -577,7 +612,8 @@ export default function App(): React.JSX.Element {
       // 先落 ref 再 await：主进程会立刻按缓存 adopt 并推事件回来，
       // 那时 useState 还没生效，靠 ref 才知道这是哪台设备（否则标题/顺序对不上）。
       activeNodeRef.current = node
-      pendingActiveRef.current = readTabStore()[node]?.active ?? null
+      activeClientRef.current = clientId
+      pendingActiveRef.current = readTabStore()[clientId ?? node]?.active ?? null
       await window.rpty.activateNode(node, clientId)
       setActiveNode(node)
       const list = await window.rpty.snapshotSessions()
@@ -589,6 +625,7 @@ export default function App(): React.JSX.Element {
   /** 离开设备：撤画面、不动 PTY。列表页继续抱着中继连接。 */
   const leaveDevice = useCallback(async () => {
     activeNodeRef.current = null
+    activeClientRef.current = null
     await window.rpty.activateNode(null, null)
     setActiveNode(null)
     setActiveClientId(null)
@@ -612,6 +649,17 @@ export default function App(): React.JSX.Element {
    * 配对是双向的：对方那边已经站在我的终端前面了，我这边还停在列表上就没意义。
    * 只在"新出现一个配对"时进一次，之后自己按「离开」回来不会被再拽进去。
    */
+  /** 连上之后自动进自己的桌面，只进一次：之后按「离开」回列表不会再被拽进去 */
+  const ownEnteredRef = useRef(false)
+
+  useEffect(() => {
+    if (status.phase !== 'online' || activeNode || !ownHostNode || detached) return
+    if (ownEnteredRef.current) return
+    ownEnteredRef.current = true
+    // 自己的桌面：终端都归我，不需要配对
+    void enterDevice(ownHostNode, status.clientId ?? null)
+  }, [status.phase, activeNode, ownHostNode, status.clientId, detached, enterDevice])
+
   const autoEnterKeyRef = useRef('')
   useEffect(() => {
     if (status.phase !== 'online') return
@@ -705,6 +753,10 @@ export default function App(): React.JSX.Element {
     )
   }
 
+  const visibleActiveId = visibleSessions.some((item) => item.id === activeId)
+    ? activeId
+    : (visibleSessions[0]?.id ?? null)
+
   const banner = !online
     ? status.phase === 'connecting' || status.phase === 'offline'
       ? '正在重连 relay…'
@@ -716,8 +768,8 @@ export default function App(): React.JSX.Element {
   return (
     <div className="app">
       <SessionList
-        sessions={sessions}
-        activeId={activeId}
+        sessions={visibleSessions}
+        activeId={visibleActiveId}
         collapsed={collapsed}
         phase={status.phase}
         agentOnline={status.agentOnline}
@@ -739,11 +791,11 @@ export default function App(): React.JSX.Element {
         {banner && <div className={`banner banner--${status.phase}`}>{banner}</div>}
 
         <div className={readOnly ? 'panes panes--readonly' : 'panes'}>
-          {sessions.map((session) => (
+          {visibleSessions.map((session) => (
             <TerminalPane
               key={session.id}
               leafId={session.id}
-              active={session.id === activeId}
+              active={session.id === visibleActiveId}
               readOnly={readOnly}
               sizeLock={
                 !session.owned && session.cols && session.rows
@@ -753,7 +805,7 @@ export default function App(): React.JSX.Element {
             />
           ))}
 
-          {sessions.length === 0 && (
+          {visibleSessions.length === 0 && (
             <div className="empty">
               <p className="empty__title">还没有终端</p>
               <p className="empty__hint">按 ⌘T 新建一个</p>
