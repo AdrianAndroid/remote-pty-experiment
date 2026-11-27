@@ -1,0 +1,16 @@
+{
+  "name": "remote-pty-experiment",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.24.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --filter rpty-desktop dev",
+    "build": "pnpm --filter rpty-desktop build",
+    "preview": "pnpm --filter rpty-desktop preview",
+    "typecheck": "pnpm --filter rpty-desktop typecheck",
+    "rebuild": "pnpm --filter rpty-desktop rebuild"
+  }
+}

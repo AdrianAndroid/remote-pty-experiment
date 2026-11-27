@@ -1,5 +1,20 @@
 # 21 · Docker 部署
 
+> **状态：已部分作废（2026-11-27）。**
+>
+> 本文下方的 Caddy 方案、双进程方案、自签证书方案均已否定。原因：
+> 443 已被 1Panel-openresty 占用且其配置里已有 WS 反代三件套，Caddy 纯属多余；
+> 证书由 1Panel 的 Let's Encrypt 自动签发，不需要自签 + 指纹固定。
+>
+> **当前定稿的部署形态见 `23-publish-and-ops.md`**，摘要：
+>
+> - 单容器，`network_mode: host`，`mem_limit: 256m`
+> - 镜像只 build 一次，源码 bind mount，日常发布 = 覆盖 `relay.py` + `docker restart`
+> - relay 监听 `127.0.0.1:8765`（host 网络下 openresty 容器直接够得着）
+> - TLS 由 openresty 终结，`proxy_buffering off` + `proxy_read_timeout 3600s`
+>
+> 仍然有效的部分：第 6 节"三个必踩的坑"里的日志轮转与回环监听两条。
+
 ## 1. 先回答：一个容器够不够
 
 **够，而且推荐。**

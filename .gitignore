@@ -4,6 +4,15 @@
 .LSOverride
 ._*
 
+# Node / Electron
+node_modules/
+out/
+dist/
+release/
+*.dmg
+*.zip
+.pnpm-store/
+
 # Python
 __pycache__/
 *.py[cod]
