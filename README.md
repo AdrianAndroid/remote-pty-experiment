@@ -48,6 +48,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [docs/00-summary.md](docs/00-summary.md) | **一页总览**：需求、12 条核心决策、密码规则、数据边界 |
 | [docs/01-background.md](docs/01-background.md) | 问题背景、方案演进全过程（frp → ssh 反向隧道 → webhook → WebSocket） |
 | [docs/02-architecture.md](docs/02-architecture.md) | 架构、数据流、进程模型、部署形态 |
 | [docs/03-protocol.md](docs/03-protocol.md) | WebSocket 帧协议定义（auth / data / resize / clipboard / heartbeat） |
@@ -66,9 +67,10 @@
 | [docs/16-password-and-psk.md](docs/16-password-and-psk.md) | **密码与 PSK**：密码作为 E2E 握手暗号，不进 relay |
 | [docs/17-optional-psk.md](docs/17-optional-psk.md) | **可选密码与 TOFU**：密码可选、加密不可选，ECDH + 静态密钥 |
 | [docs/18-directional-permission.md](docs/18-directional-permission.md) | **方向性权限**：建链不需密码，反向控制需密码（提权模型） |
+| [docs/19-ui-prototype.md](docs/19-ui-prototype.md) | **UI 原型**：8 屏 ASCII 图、状态图标、文案对照、交互流 |
 | [openspec/](openspec/) | 需求规格与变更（本项目所有功能变更必须先立 OpenSpec change） |
 
-> 阅读顺序建议：`01 → 02 → 03 → 08 → 12 → 14 → 15 → 16 → 17 → 18 → 13 → 11 → 09`。
+> 阅读顺序建议：`00 → 01 → 02 → 03 → 08 → 12 → 14 → 15 → 16 → 17 → 18 → 19 → 13 → 11 → 09`。
 > `02` / `03` 中关于固定角色（agent / terminal）的部分已被 `10` 取代，其余内容仍然有效。
 
 ---
