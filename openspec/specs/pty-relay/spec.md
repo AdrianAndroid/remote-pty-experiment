@@ -151,3 +151,29 @@ agent SHALL 在未设置 `AUTHORIZED=1` 时拒绝启动。
 #### Scenario: 撤掉的标签不被列表装回
 - **WHEN** 镜像端已关闭某标签，之后收到该节点的会话列表广播
 - **THEN** 该标签不会自动重新出现，直到下一次连接重建
+
+### Requirement: 终端尺寸唯一权威
+
+一个 PTY 的 cols/rows SHALL 只由创建端（owned）决定；镜像端不得改变 PTY 尺寸，渲染尺寸 SHALL 严格等于 PTY 尺寸。
+
+系统 SHALL 拒绝把明显不合理的尺寸（`cols < 20` 或 `rows < 5`）写进 PTY。
+
+#### Scenario: 创建端调整窗口
+- **WHEN** 创建端改变窗口大小
+- **THEN** PTY 跟着变成对应的行列，其它控制端收到 `SESSION_RESIZED` 并立即按新尺寸重排
+
+#### Scenario: 镜像端窗口更小
+- **WHEN** 镜像端容器装不下 PTY 的行列
+- **THEN** 画面整体等比缩小以完整可见，xterm 的行列保持不变（不裁剪、不改字号度量）
+
+#### Scenario: 镜像端窗口更大
+- **WHEN** 镜像端容器大于 PTY 的行列
+- **THEN** 画面按 PTY 尺寸绘制，多余空间留白，不改字号
+
+#### Scenario: 尚未布局时不写尺寸
+- **WHEN** 标签页不可见或窗口还没完成布局，量到的容器尺寸接近 0
+- **THEN** 不发起尺寸变更，PTY 尺寸保持不变
+
+#### Scenario: 行列与 PTY 不一致
+- **WHEN** 客户端的行列和 PTY 不一致
+- **THEN** 全屏 TUI（如 claude、vim）仍然逐行对齐，不出现文字重叠或内容串行
