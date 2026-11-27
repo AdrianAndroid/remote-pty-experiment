@@ -49,6 +49,8 @@ export class RelayClient {
   private agentOnline = false
   private hostname = ''
   private backoff = 600
+  /** 只读：连上了、画面在刷，但键盘输入与尺寸变更都不发给被控端。 */
+  private readOnly = false
   private reconnectTimer: NodeJS.Timeout | null = null
   private manualClose = false
 
@@ -348,7 +350,20 @@ export class RelayClient {
     return { ok: true, sessionId }
   }
 
+  /**
+   * 切换只读。拦在这一层而不是只在渲染层拦，是因为渲染层能被绕过
+   * （DevTools、粘贴事件、addon），主进程是唯一收口的地方。
+   */
+  setReadOnly(readOnly: boolean): void {
+    this.readOnly = readOnly
+  }
+
+  isReadOnly(): boolean {
+    return this.readOnly
+  }
+
   write(leafId: string, data: string): void {
+    if (this.readOnly) return
     const session = this.sessions.get(leafId)
     if (!session) return
     const buf = Buffer.from(data, 'utf8')
@@ -360,6 +375,8 @@ export class RelayClient {
   }
 
   resize(leafId: string, cols: number, rows: number): void {
+    // 只读端不去改被控端的 PTY 尺寸，否则会和控制端互相抢，画面来回跳。
+    if (this.readOnly) return
     const session = this.sessions.get(leafId)
     if (!session) return
     if (session.cols === cols && session.rows === rows) return

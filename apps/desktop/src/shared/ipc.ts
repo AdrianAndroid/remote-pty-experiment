@@ -25,6 +25,11 @@ export const IpcChannel = {
   SessionClose: 'session:close',
   SessionList: 'session:list',
 
+  /** 只读模式：渲染 -> 主 查询/切换，主 -> 渲染 广播 */
+  ReadOnlyGet: 'readonly:get',
+  ReadOnlySet: 'readonly:set',
+  ReadOnlyChanged: 'readonly:changed',
+
   /** 主 -> 渲染：推送 */
   SessionData: 'session:data',
   SessionStateChanged: 'session:state',
@@ -35,7 +40,7 @@ export const IpcChannel = {
   MenuCommand: 'menu:command'
 } as const
 
-export type MenuCommand = 'new-tab' | 'close-tab' | 'next-tab' | 'prev-tab' | 'goto-tab' | 'toggle-sidebar'
+export type MenuCommand = 'new-tab' | 'close-tab' | 'next-tab' | 'prev-tab' | 'goto-tab' | 'toggle-sidebar' | 'toggle-readonly'
 
 export interface ConfigInfo {
   url: string
@@ -106,6 +111,11 @@ export interface RptyBridge {
   resize(leafId: string, cols: number, rows: number): void
   close(leafId: string): Promise<void>
   list(): Promise<string[]>
+
+  /** 只读：连上了、画面在刷，但键盘/粘贴/尺寸都不发给被控端 */
+  getReadOnly(): Promise<boolean>
+  setReadOnly(readOnly: boolean): Promise<boolean>
+  onReadOnly(handler: (readOnly: boolean) => void): () => void
 
   onData(handler: (payload: SessionDataPayload) => void): () => void
   onState(handler: (payload: SessionStatePayload) => void): () => void

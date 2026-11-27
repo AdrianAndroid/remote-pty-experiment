@@ -32,13 +32,16 @@ export default function App(): React.JSX.Element {
   const [collapsed, setCollapsed] = useState(false)
   const [config, setConfig] = useState<ConfigInfo>({ url: '', hasToken: false })
   const [busy, setBusy] = useState(false)
+  const [readOnly, setReadOnly] = useState(false)
   const [error, setError] = useState('')
 
   const seqRef = useRef(0)
   const autoCreatedRef = useRef(false)
+  const readOnlyRef = useRef(false)
   const activeIdRef = useRef<string | null>(null)
   const sessionsRef = useRef<SessionMeta[]>([])
   activeIdRef.current = activeId
+  readOnlyRef.current = readOnly
   sessionsRef.current = sessions
 
   // ---------------------------------------------------------- 初始化
@@ -46,6 +49,7 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     void window.rpty.getConfigInfo().then(setConfig)
     void window.rpty.getStatus().then(setStatus)
+    void window.rpty.getReadOnly().then(setReadOnly)
   }, [])
 
   // ---------------------------------------------------------- 事件订阅
@@ -72,12 +76,23 @@ export default function App(): React.JSX.Element {
       setError(message ? `${message}（${code}）` : code)
     })
 
+    const offReadOnly = window.rpty.onReadOnly((value) => setReadOnly(value))
+
     return () => {
       offStatus()
       offState()
       offExit()
       offError()
+      offReadOnly()
     }
+  }, [])
+
+  // ---------------------------------------------------------- 只读
+
+  const toggleReadOnly = useCallback(async () => {
+    // 用 ref 读当前值：菜单订阅只建一次，闭包里的 readOnly 会是首次渲染的旧值。
+    const next = await window.rpty.setReadOnly(!readOnlyRef.current)
+    setReadOnly(next)
   }, [])
 
   // ---------------------------------------------------------- 会话操作
@@ -173,12 +188,15 @@ export default function App(): React.JSX.Element {
         case 'toggle-sidebar':
           setCollapsed((value) => !value)
           break
+        case 'toggle-readonly':
+          void toggleReadOnly()
+          break
         default:
           break
       }
     })
     return offMenu
-  }, [createSession, closeSession, stepTab, gotoTab])
+  }, [createSession, closeSession, stepTab, gotoTab, toggleReadOnly])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -246,22 +264,25 @@ export default function App(): React.JSX.Element {
         phase={status.phase}
         agentOnline={status.agentOnline}
         hostname={status.hostname ?? ''}
+        readOnly={readOnly}
         onSelect={setActiveId}
         onCreate={() => void createSession()}
         onClose={(id) => void closeSession(id)}
         onRename={renameSession}
         onToggle={() => setCollapsed((value) => !value)}
+        onToggleReadOnly={() => void toggleReadOnly()}
       />
 
       <main className="stage">
         {banner && <div className={`banner banner--${status.phase}`}>{banner}</div>}
 
-        <div className="panes">
+        <div className={readOnly ? 'panes panes--readonly' : 'panes'}>
           {sessions.map((session) => (
             <TerminalPane
               key={session.id}
               leafId={session.id}
               active={session.id === activeId}
+              readOnly={readOnly}
             />
           ))}
 

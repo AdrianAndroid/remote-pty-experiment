@@ -20,9 +20,15 @@ import { TERMINAL_OPTIONS } from '../lib/terminal-options'
 interface TerminalPaneProps {
   leafId: string
   active: boolean
+  /** 只读：画面照常刷新，但键盘输入被吃掉，不发给被控端 */
+  readOnly?: boolean
 }
 
-export function TerminalPane({ leafId, active }: TerminalPaneProps): React.JSX.Element {
+export function TerminalPane({
+  leafId,
+  active,
+  readOnly = false
+}: TerminalPaneProps): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -120,6 +126,19 @@ export function TerminalPane({ leafId, active }: TerminalPaneProps): React.JSX.E
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [leafId])
 
+  // 只读开关：xterm 自己就能挡住键盘，主进程再挡一道，双保险。
+  useEffect(() => {
+    const term = termRef.current
+    if (!term) return
+    term.options.disableStdin = readOnly
+    if (readOnly) {
+      // 收起焦点框，视觉上也别让人以为能敲。
+      term.blur()
+    } else if (active) {
+      term.focus()
+    }
+  }, [readOnly, active])
+
   // 可见性切换：attach/detach WebGL + 延迟一帧 fit。
   useEffect(() => {
     if (!active) {
@@ -140,7 +159,18 @@ export function TerminalPane({ leafId, active }: TerminalPaneProps): React.JSX.E
   }, [active, attachWebgl, detachWebgl])
 
   return (
-    <div className={active ? 'pane pane--active' : 'pane'} aria-hidden={!active}>
+    <div
+      className={
+        active
+          ? readOnly
+            ? 'pane pane--active pane--readonly'
+            : 'pane pane--active'
+          : readOnly
+            ? 'pane pane--readonly'
+            : 'pane'
+      }
+      aria-hidden={!active}
+    >
       <div ref={hostRef} className="pane__host" />
     </div>
   )

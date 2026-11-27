@@ -21,11 +21,13 @@ interface SessionListProps {
   phase: ConnectionPhase
   agentOnline: boolean
   hostname: string
+  readOnly: boolean
   onSelect: (id: string) => void
   onCreate: () => void
   onClose: (id: string) => void
   onRename: (id: string, title: string) => void
   onToggle: () => void
+  onToggleReadOnly: () => void
 }
 
 const STATE_LABEL: Record<SessionState, string> = {
@@ -43,11 +45,13 @@ export function SessionList({
   phase,
   agentOnline,
   hostname,
+  readOnly,
   onSelect,
   onCreate,
   onClose,
   onRename,
-  onToggle
+  onToggle,
+  onToggleReadOnly
 }: SessionListProps): React.JSX.Element {
   const online = phase === 'online' && agentOnline
 
@@ -128,8 +132,24 @@ export function SessionList({
         {!collapsed && <kbd>⌘T</kbd>}
       </button>
 
+      <button
+        type="button"
+        className={readOnly ? 'modebtn modebtn--readonly' : 'modebtn'}
+        onClick={onToggleReadOnly}
+        title={
+          readOnly
+            ? '只读中：只能看，敲键盘不会发出去（⌘⇧L 切回可操作）'
+            : '可操作：键盘会发到被控端（⌘⇧L 切成只读）'
+        }
+      >
+        <span className="modebtn__dot" />
+        {!collapsed && <span>{readOnly ? '只读' : '可操作'}</span>}
+        {!collapsed && <kbd>⌘⇧L</kbd>}
+      </button>
+
       {!collapsed && (
         <footer className="sidebar__foot">
+          {readOnly && <span className="foot__ro">只读模式</span>}
           {sessions.length} / 20 个会话
         </footer>
       )}

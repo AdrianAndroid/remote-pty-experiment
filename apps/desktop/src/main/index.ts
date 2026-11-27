@@ -10,7 +10,7 @@ import { BrowserWindow, Menu, app, ipcMain, shell } from 'electron'
 import type { MenuCommand, RelayConfig } from '../shared/ipc'
 import { IpcChannel } from '../shared/ipc'
 import { RelayClient } from './relay-client'
-import { loadConfig, saveConfig } from './store'
+import { loadConfig, saveConfig, saveReadOnly } from './store'
 
 let win: BrowserWindow | null = null
 
@@ -113,6 +113,12 @@ function buildMenu(): void {
           label: '收起 / 展开标签列',
           accelerator: 'CmdOrCtrl+B',
           click: () => sendMenu('toggle-sidebar')
+        },
+        { type: 'separator' },
+        {
+          label: '只读模式（只看不动）',
+          accelerator: 'CmdOrCtrl+Shift+L',
+          click: () => sendMenu('toggle-readonly')
         }
       ]
     },
@@ -160,7 +166,7 @@ function registerIpc(): void {
     }
     try {
       const status = await relay.connect({ url, token })
-      saveConfig({ url, token })
+      saveConfig({ url, token, readOnly: relay.isReadOnly() })
       return status
     } catch (error) {
       return {
@@ -200,6 +206,16 @@ function registerIpc(): void {
   })
 
   ipcMain.handle(IpcChannel.SessionList, () => relay.list())
+
+  ipcMain.handle(IpcChannel.ReadOnlyGet, () => relay.isReadOnly())
+
+  ipcMain.handle(IpcChannel.ReadOnlySet, (_event, value: boolean) => {
+    const next = Boolean(value)
+    relay.setReadOnly(next)
+    saveReadOnly(next)
+    send(IpcChannel.ReadOnlyChanged, next)
+    return next
+  })
 }
 
 app.whenReady().then(() => {
@@ -209,6 +225,8 @@ app.whenReady().then(() => {
 
   // 有保存过的配置就静默尝试一次，失败也留在连接页。
   const saved = loadConfig()
+  // 只读开关在连之前就要生效，否则第一屏的键盘输入会漏出去。
+  relay.setReadOnly(Boolean(saved.readOnly))
   if (saved.url && saved.token) {
     relay.connect({ url: saved.url, token: saved.token }).catch(() => undefined)
   }
