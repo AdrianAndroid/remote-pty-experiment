@@ -64,9 +64,10 @@
 | [docs/14-one-to-one.md](docs/14-one-to-one.md) | **一对一 · 单向建链 · 双向使用**：最终收敛模型（删掉撞车与多桥） |
 | [docs/15-presence-and-pairing.md](docs/15-presence-and-pairing.md) | **在线列表与点击配对**：control/data 双连接，presence 模型 |
 | [docs/16-password-and-psk.md](docs/16-password-and-psk.md) | **密码与 PSK**：密码作为 E2E 握手暗号，不进 relay |
+| [docs/17-optional-psk.md](docs/17-optional-psk.md) | **可选密码与 TOFU**：密码可选、加密不可选，ECDH + 静态密钥 |
 | [openspec/](openspec/) | 需求规格与变更（本项目所有功能变更必须先立 OpenSpec change） |
 
-> 阅读顺序建议：`01 → 02 → 03 → 08 → 12 → 14 → 15 → 16 → 13 → 11 → 09`。
+> 阅读顺序建议：`01 → 02 → 03 → 08 → 12 → 14 → 15 → 16 → 17 → 13 → 11 → 09`。
 > `02` / `03` 中关于固定角色（agent / terminal）的部分已被 `10` 取代，其余内容仍然有效。
 
 ---
