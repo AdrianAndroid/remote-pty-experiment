@@ -568,7 +568,7 @@ export default function App(): React.JSX.Element {
    * 顺序不能反 —— 反了的话 adopt 事件会先涌进来，刚铺好的标签又被清一次。
    */
   const enterDevice = useCallback(
-    async (node: string, clientId: string) => {
+    async (node: string, clientId: string | null) => {
       setError('')
       setActiveClientId(clientId)
       setSessions([])
@@ -605,6 +605,31 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     for (const item of status.clients ?? []) clientNamesRef.current[item.client] = item.name || ''
   }, [status.clients])
+
+  /**
+   * 有人配对我（进我的客户端）→ 我也自动进终端列表。
+   *
+   * 配对是双向的：对方那边已经站在我的终端前面了，我这边还停在列表上就没意义。
+   * 只在"新出现一个配对"时进一次，之后自己按「离开」回来不会被再拽进去。
+   */
+  const autoEnterKeyRef = useRef('')
+  useEffect(() => {
+    if (status.phase !== 'online') return
+    const incoming = (status.pairs ?? []).filter((pair) => pair.to === status.clientId)
+    if (incoming.length === 0) {
+      autoEnterKeyRef.current = ''
+      return
+    }
+    if (activeNode || !ownHostNode) return
+    const key = incoming
+      .map((pair) => pair.from)
+      .sort()
+      .join(',')
+    if (autoEnterKeyRef.current === key) return
+    autoEnterKeyRef.current = key
+    // 进自己的宿主，不带配对目标（main 那边也会跳过自配）
+    void enterDevice(ownHostNode, status.clientId ?? null)
+  }, [status.pairs, status.phase, status.clientId, activeNode, ownHostNode, enterDevice])
 
   /**
    * 我进的那个客户端没了（对方点「断开中继」或关了窗口）→ 自动回列表。
@@ -653,11 +678,16 @@ export default function App(): React.JSX.Element {
     (status.clients ?? []).find((item) => item.client === activeClientId) ??
     (status.clients ?? []).find((item) => item.host === activeNode && item.client !== status.clientId)
   const deviceName = activeClient?.name ?? (activeDevice ? deviceLabel(activeDevice) : (activeNode ?? ''))
-  // relay 那边确认了配对才显示「已配对」—— 自己点进列表不算数
+  // relay 那边确认了配对才显示「已配对」—— 自己点进列表不算数。
+  // 两种情况都算：我进了别人（from 是我），或别人进了我（to 是我、我正站在自己宿主上）。
   const pairedWith =
     (status.pairs ?? []).find(
       (pair) => pair.from === status.clientId && pair.to === activeClientId
-    )?.to_name ?? ''
+    )?.to_name ??
+    (activeNode && activeNode === ownHostNode
+      ? (status.pairs ?? []).find((pair) => pair.to === status.clientId)?.from_name
+      : '') ??
+    ''
 
   if (detached || !showWorkspace) {
     return (

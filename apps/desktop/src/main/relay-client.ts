@@ -363,7 +363,8 @@ export class RelayClient {
     const ws = this.ctl
     if (!ws || ws.readyState !== 1) return
     try {
-      if (node && client) {
+      // 进自己的宿主（被别人配对后自动进终端列表）不需要配对，否则会配给自己
+      if (node && client && client !== this.clientId) {
         const target = this.clients.find((item) => item.client === client)
         ws.send(
           JSON.stringify({
