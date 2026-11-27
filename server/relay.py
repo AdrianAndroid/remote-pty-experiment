@@ -378,8 +378,7 @@ class Relay:
                         if token:
                             self.channels.setdefault(token, Channel()).owner = ws
                         # 编号由 relay 全局分配：多节点各自从 1 数必然撞号。
-                        self.seq += 1
-                        msg["index"] = self.seq
+                        msg["index"] = self.next_index()
                         sid = str(msg.get("session_id") or "")
                         if sid:
                             self.sid_node[sid] = node.node_id
@@ -417,6 +416,21 @@ class Relay:
                 for node in self.nodes.values():
                     if node.ws is not None:
                         await self.send_json(node.ws, {"type": "CTL_OFFLINE"})
+
+    def next_index(self) -> int:
+        """分配下一个全局编号。
+
+        relay 重启后 seq 归零，但各节点上还活着旧会话。先把已知的最大编号捞回来，
+        否则新会话会从 1 开始和旧会话撞号。
+        """
+        known = [self.seq, *self.sid_index.values()]
+        for node in self.nodes.values():
+            for item in (node.last_list or {}).get("sessions") or []:
+                idx = item.get("index")
+                if isinstance(idx, int):
+                    known.append(idx)
+        self.seq = max(known) + 1
+        return self.seq
 
     def resolve_node(self, msg: Dict[str, Any]) -> Optional[Node]:
         """决定这条信令该发给哪个节点。

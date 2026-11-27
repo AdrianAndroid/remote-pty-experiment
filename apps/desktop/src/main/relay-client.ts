@@ -80,6 +80,7 @@ export class RelayClient {
   /** 只读：连上了、画面在刷，但键盘输入与尺寸变更都不发给被控端。 */
   private readOnly = false
   private reconnectTimer: NodeJS.Timeout | null = null
+  private resyncTimer: NodeJS.Timeout | null = null
   private manualClose = false
 
   constructor(private readonly handlers: RelayHandlers) {}
@@ -376,6 +377,18 @@ export class RelayClient {
 
   /** ctl 重连后，把已知会话重新要一遍。 */
   private resyncSessions(): void {
+    if (!this.agentOnline) return
+    // 晚一点点再补：让各节点先把 SESSION_LIST 报上来，relay 才能把旧编号捞回去，
+    // 否则重连瞬间新建的会话会从「终端 1」重新开始，和活着的旧会话撞号。
+    if (!this.resyncTimer) {
+      this.resyncTimer = setTimeout(() => {
+        this.resyncTimer = null
+        this.doResync()
+      }, 900)
+    }
+  }
+
+  private doResync(): void {
     if (!this.agentOnline) return
     for (const session of this.sessions.values()) {
       if (session.state === 'exited') continue
