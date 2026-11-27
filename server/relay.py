@@ -6,13 +6,18 @@ rpty relay —— 云中继。
 
     /agent        被控端（PTY 宿主）长连接，JSON 信令
     /ctl          控制端长连接，JSON 信令
-    /d/<token>    某个会话的数据通道，纯二进制双向泵
+    /d/<token>    某个会话的数据通道，纯二进制
 
-relay 的设计目标是「什么都不懂」：不解析终端字节流，不生成会话 id，不
-保存会话状态。配对两个端点所需的 token 由控制端生成并随 SESSION_CREATE
-下发给 agent，两边各自来连 /d/<token>；先到的排队，后到的立刻开始双向
-转发。因此 relay 挂了重启，只要两端重连，会话本身不受影响（PTY 活在
-agent 那台机器上）。
+数据通道是 **1:N 多播**：一个 PTY 只有一条 agent 侧连接（role=agent），
+可以有任意多条控制端连接（role=ctl）。agent 的输出广播给所有 viewer，
+任何 viewer 的按键都汇进同一条连接写回 PTY —— 这就是「多个客户端看同一
+块终端、谁敲都同步」的模式（Orca Mobile 那种镜像）。
+
+新 viewer 连上时，relay 给 agent 发 VIEWER_JOINED，agent 回一份环形缓冲
+快照，relay 定向只发给这个新 viewer，然后才开始给它推增量。中间到得太
+早的增量先排队，不会和历史混序。
+
+relay 不解析终端字节流、不生成会话 id；token 由控制端生成。
 
 环境变量：
     RPty_TOKEN    必填，agent 与 ctl 共用的共享密钥
@@ -24,6 +29,7 @@ agent 那台机器上）。
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -41,6 +47,33 @@ LOG = logging.getLogger("relay")
 
 # 终端输出可能一次来很大（比如 cat 一个二进制文件），但不能无限。
 MAX_MESSAGE = 8 * 1024 * 1024
+# viewer 还没拿到快照时最多替它排队多少条增量，超了就丢（宁可少画一段也不能撑爆内存）。
+VIEWER_QUEUE_MAX = 512
+
+
+class Viewer:
+    """一条控制端数据通道。"""
+
+    __slots__ = ("cid", "ws", "ready", "queue")
+
+    def __init__(self, cid: str, ws: WebSocketServerProtocol) -> None:
+        self.cid = cid
+        self.ws = ws
+        # 还没拿到快照前，增量先排队，保证「历史在前、增量在后」的顺序。
+        self.ready = False
+        self.queue: list[bytes] = []
+
+
+class Channel:
+    """一个 data_token 对应的多播通道。"""
+
+    __slots__ = ("agent", "viewers", "owner")
+
+    def __init__(self) -> None:
+        self.agent: Optional[WebSocketServerProtocol] = None
+        self.viewers: Dict[str, Viewer] = {}
+        # 谁创建的会话谁定尺寸，避免多端互相抢 PTY 的 cols/rows。
+        self.owner: Optional[WebSocketServerProtocol] = None
 
 
 class Relay:
@@ -49,13 +82,19 @@ class Relay:
         self.pair_timeout = pair_timeout
 
         self.agent: Optional[WebSocketServerProtocol] = None
-        # 允许多个控制端同时在线（同一台被控机，多个窗口/多台客户端各开各的会话）。
-        # 会话是端到端配对的，/ctl 只是信令总线，多一个 ctl 不会串数据。
+        # 允许多个控制端同时在线（同一台被控机，多个窗口/多台客户端看同一批会话）。
         self.ctls: Set[WebSocketServerProtocol] = set()
 
-        # data_token -> 先到的那一端
-        self.pending: Dict[str, WebSocketServerProtocol] = {}
-        self.pending_since: Dict[str, float] = {}
+        # data_token -> 多播通道
+        self.channels: Dict[str, Channel] = {}
+        # cid -> (token, Viewer)，用于把 agent 的快照定向投给某一个 viewer
+        self.viewers: Dict[str, tuple[str, Viewer]] = {}
+        self._cid_seq = 0
+
+        # session_id -> data_token，resize 仲裁用
+        self.sid_token: Dict[str, str] = {}
+        # 最近一次 agent 报的会话列表，新控制端一连上就先给它，省一个来回。
+        self.last_list: Optional[Dict[str, Any]] = None
 
         self.started_at = time.time()
         self.stats = {
@@ -94,7 +133,8 @@ class Relay:
                     "agent": self.agent is not None,
                     "ctl": len(self.ctls) > 0,
                     "ctls": len(self.ctls),
-                    "pending_channels": len(self.pending),
+                    "channels": len(self.channels),
+                    "viewers": sum(len(c.viewers) for c in self.channels.values()),
                     **self.stats,
                 },
                 ensure_ascii=False,
@@ -122,7 +162,9 @@ class Relay:
             if not token:
                 await ws.close(code=4004, reason="missing token")
                 return
-            await self.handle_data(ws, token)
+            query = parse_qs(urlparse(path).query)
+            role = (query.get("role") or ["ctl"])[0]
+            await self.handle_data(ws, token, role)
         else:
             await ws.close(code=4004, reason="unknown route")
 
@@ -156,6 +198,26 @@ class Relay:
                     continue
                 if not isinstance(msg, dict):
                     continue
+                if msg.get("type") == "SESSION_SNAPSHOT":
+                    # 快照只补给它要补的那个新 viewer，不能广播，
+                    # 否则已经开着画面的端会被历史重画一遍。
+                    await self.deliver_snapshot(msg)
+                    continue
+                # 顺手记住 session_id -> data_token，resize 仲裁要用。
+                kind = msg.get("type")
+                if kind == "SESSION_CREATED":
+                    sid = str(msg.get("session_id") or "")
+                    token = str(msg.get("data_token") or "")
+                    if sid and token:
+                        self.sid_token[sid] = token
+                elif kind == "SESSION_LIST":
+                    for item in msg.get("sessions") or []:
+                        if isinstance(item, dict):
+                            sid = str(item.get("session_id") or "")
+                            token = str(item.get("data_token") or "")
+                            if sid and token:
+                                self.sid_token[sid] = token
+                    self.last_list = {**msg, "src": "agent"}
                 await self.broadcast_ctls({**msg, "src": "agent"})
         except ConnectionClosed:
             pass
@@ -175,11 +237,15 @@ class Relay:
                 "type": "HELLO",
                 "agent_online": self.agent is not None,
                 "server_time": int(time.time()),
-                "version": "1.1.0",
+                "version": "1.2.0",
             },
         )
         if self.agent is not None:
-            # 让 agent 补发一次会话列表，新连上的控制端才知道被控机叫什么、有哪些会话。
+            # 先把上次缓存的列表直接甩给新控制端 —— 它要在几百毫秒内知道
+            # 被控机上已经有谁在开终端，才不会急着自己新建一个。
+            if self.last_list is not None:
+                await self.send_json(ws, self.last_list)
+            # 再让 agent 补发一次权威列表（缓存可能过期：刚关/刚建）。
             await self.send_json(self.agent, {"type": "CTL_ONLINE"})
 
         try:
@@ -205,6 +271,21 @@ class Relay:
                             },
                         )
                         continue
+
+                    if msg_type == "SESSION_CREATE":
+                        # 谁建谁定尺寸。attach 来的端只镜像，不改 PTY 大小。
+                        token = str(msg.get("data_token") or "")
+                        if token:
+                            self.channels.setdefault(token, Channel()).owner = ws
+                    elif msg_type == "SESSION_RESIZE":
+                        sid = str(msg.get("session_id") or "")
+                        token = self.sid_token.get(sid)
+                        channel = self.channels.get(token) if token else None
+                        if channel is not None and channel.owner is not None and channel.owner is not ws:
+                            # 镜像端不改 PTY 尺寸，否则两端会互相拉扯、画面来回跳。
+                            LOG.debug("忽略非 owner 的 resize sid=%s", sid[:8])
+                            continue
+
                     await self.send_json(self.agent, {**msg, "src": "ctl"})
                 else:
                     # 其它类型直接回显错误，避免静默吞掉。
@@ -222,54 +303,137 @@ class Relay:
 
     # ---------------------------------------------------------------- 数据
 
-    async def handle_data(self, ws: WebSocketServerProtocol, token: str) -> None:
-        waiter = self.pending.pop(token, None)
-        self.pending_since.pop(token, None)
+    def _next_cid(self) -> str:
+        self._cid_seq += 1
+        return f"v{self._cid_seq}"
 
-        if waiter is None:
-            self.pending[token] = ws
-            self.pending_since[token] = time.time()
-            LOG.debug("数据通道 %s 先到，等待配对", token[:8])
-            try:
-                await asyncio.wait_for(ws.wait_closed(), timeout=self.pair_timeout)
-            except asyncio.TimeoutError:
-                LOG.warning("数据通道 %s 等待配对超时", token[:8])
-                await ws.close(code=4008, reason="pair timeout")
-            finally:
-                if self.pending.get(token) is ws:
-                    self.pending.pop(token, None)
-                    self.pending_since.pop(token, None)
+    def _drop_channel_if_idle(self, token: str) -> None:
+        channel = self.channels.get(token)
+        if channel is None:
             return
+        if channel.agent is None and not channel.viewers:
+            self.channels.pop(token, None)
 
-        LOG.info("数据通道 %s 配对成功", token[:8])
-        self.stats["sessions_opened"] += 1
-        await self.pump(waiter, ws)
+    async def handle_data(
+        self, ws: WebSocketServerProtocol, token: str, role: str
+    ) -> None:
+        """一个 data_token 下的多播通道。
 
-    async def pump(self, a: WebSocketServerProtocol, b: WebSocketServerProtocol) -> None:
-        """双向字节泵。任何一端断开，把另一端也关掉。"""
+        role=agent：唯一一条，PTY 宿主。它发来的字节广播给所有 viewer。
+        role=ctl  ：任意多条，都是 viewer。谁发的字节都转给 agent。
+        """
+        channel = self.channels.setdefault(token, Channel())
 
-        async def forward(src, dst, counter: str) -> None:
+        if role == "agent":
+            previous = channel.agent
+            channel.agent = ws
+            if previous is not None and previous is not ws:
+                LOG.info("数据通道 %s 的 agent 重连，顶掉旧连接", token[:8])
+                try:
+                    await previous.close(code=4002, reason="replaced")
+                except Exception:  # noqa: BLE001
+                    pass
+            LOG.info("数据通道 %s agent 侧已连（viewer %d 个）", token[:8], len(channel.viewers))
             try:
-                async for chunk in src:
+                async for chunk in ws:
                     if isinstance(chunk, str):
-                        # 控制端理论上只发二进制；万一发了文本，按 UTF-8 转。
                         chunk = chunk.encode("utf-8")
-                    self.stats[counter] += len(chunk)
-                    await dst.send(chunk)
+                    self.stats["bytes_from_agent"] += len(chunk)
+                    for viewer in list(channel.viewers.values()):
+                        if viewer.ready:
+                            await self._send_bytes(viewer.ws, chunk)
+                        elif len(viewer.queue) < VIEWER_QUEUE_MAX:
+                            # 还没拿到快照，先攒着，别和历史串序。
+                            viewer.queue.append(chunk)
             except ConnectionClosed:
                 pass
             finally:
-                try:
-                    await dst.close()
-                except Exception:  # noqa: BLE001
-                    pass
+                if channel.agent is ws:
+                    channel.agent = None
+                    LOG.info("数据通道 %s agent 侧断开", token[:8])
+                self._drop_channel_if_idle(token)
+            return
 
-        await asyncio.gather(
-            forward(a, b, "bytes_from_ctl"),
-            forward(b, a, "bytes_from_agent"),
-            return_exceptions=True,
-        )
-        LOG.info("数据通道关闭")
+        # ---- viewer
+        cid = self._next_cid()
+        viewer = Viewer(cid, ws)
+        channel.viewers[cid] = viewer
+        self.viewers[cid] = (token, viewer)
+        LOG.info("数据通道 %s viewer %s 加入（共 %d）", token[:8], cid, len(channel.viewers))
+
+        if self.agent is not None:
+            # 请 agent 回一份环形缓冲，只补这个新来的。
+            # 注意：必须走信令连接 /agent —— 数据通道里的一切字节都会被当成
+            # 键盘输入写进 PTY，信令发到那里就会把 JSON 打到终端上。
+            await self.send_json(
+                self.agent, {"type": "VIEWER_JOINED", "data_token": token, "cid": cid}
+            )
+            # 兜底：agent 那边卡住（信令断、会话没了）也不能让 viewer 一直等，
+            # 否则它收到的增量会无限期排队，看起来就是「连上了但没画面」。
+            asyncio.get_running_loop().call_later(2.5, self._force_ready, cid)
+        else:
+            # agent 不在，没有历史可补，直接开始收（等它重连后自动续上）。
+            viewer.ready = True
+
+        try:
+            async for chunk in ws:
+                if isinstance(chunk, str):
+                    chunk = chunk.encode("utf-8")
+                self.stats["bytes_from_ctl"] += len(chunk)
+                agent_ws = channel.agent
+                if agent_ws is not None:
+                    try:
+                        await agent_ws.send(chunk)
+                    except Exception:  # noqa: BLE001
+                        LOG.debug("转发按键到 agent 失败", exc_info=True)
+        except ConnectionClosed:
+            pass
+        finally:
+            channel.viewers.pop(cid, None)
+            self.viewers.pop(cid, None)
+            LOG.info("数据通道 %s viewer %s 离开（剩 %d）", token[:8], cid, len(channel.viewers))
+            self._drop_channel_if_idle(token)
+
+    async def _send_bytes(self, ws: WebSocketServerProtocol, chunk: bytes) -> None:
+        try:
+            await ws.send(chunk)
+        except ConnectionClosed:
+            pass
+        except Exception:  # noqa: BLE001
+            LOG.debug("推送字节失败", exc_info=True)
+
+    def _force_ready(self, cid: str) -> None:
+        entry = self.viewers.get(cid)
+        if entry is None:
+            return
+        _token, viewer = entry
+        if viewer.ready:
+            return
+        LOG.warning("viewer %s 等快照超时，直接放开增量", cid)
+        # 复用 deliver_snapshot 的收尾逻辑：先把排队的增量按序放出去，再置 ready。
+        asyncio.get_running_loop().create_task(self.deliver_snapshot({"cid": cid}))
+
+    async def deliver_snapshot(self, msg: Dict[str, Any]) -> None:
+        """agent 的快照按 cid 定向投递，并把它排队中的增量放行。"""
+        cid = str(msg.get("cid") or "")
+        entry = self.viewers.get(cid)
+        if entry is None:
+            return
+        _token, viewer = entry
+        data_b64 = msg.get("data")
+        if data_b64:
+            try:
+                await self._send_bytes(viewer.ws, base64.b64decode(data_b64))
+            except Exception:  # noqa: BLE001
+                LOG.warning("快照解码失败 cid=%s", cid, exc_info=True)
+
+        # 历史先到，随后放开排队中的增量，画面就和实时接上了。
+        viewer.ready = True
+        queued = viewer.queue
+        viewer.queue = []
+        for chunk in queued:
+            await self._send_bytes(viewer.ws, chunk)
+        LOG.debug("快照已投递 cid=%s（补 %d 条增量）", cid, len(queued))
 
 
 def _const_eq(a: str, b: str) -> bool:

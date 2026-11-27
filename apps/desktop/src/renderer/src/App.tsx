@@ -50,6 +50,20 @@ export default function App(): React.JSX.Element {
     void window.rpty.getConfigInfo().then(setConfig)
     void window.rpty.getStatus().then(setStatus)
     void window.rpty.getReadOnly().then(setReadOnly)
+    // 主进程比窗口先连上 relay，adopt 事件在那之前就发完了；这里补拉一次当前会话。
+    void window.rpty.snapshotSessions().then((list) => {
+      if (!Array.isArray(list) || list.length === 0) return
+      autoCreatedRef.current = true
+      setSessions((prev) => {
+        const known = new Set(prev.map((item) => item.id))
+        const added = list
+          .filter((item) => !known.has(item.leafId))
+          .map((item) => ({ id: item.leafId, title: `终端 ${++seqRef.current}`, state: 'active' as const }))
+        if (added.length === 0) return prev
+        setActiveId((current) => current ?? added[0].id)
+        return [...prev, ...added]
+      })
+    })
   }, [])
 
   // ---------------------------------------------------------- 事件订阅
@@ -72,6 +86,17 @@ export default function App(): React.JSX.Element {
       )
     })
 
+    // 被控端上已有会话（另一个客户端开的）：不新建，直接挂上去镜像同一块终端。
+    const offAdopted = window.rpty.onAdopted(({ leafId }) => {
+      setSessions((prev) => {
+        if (prev.some((item) => item.id === leafId)) return prev
+        autoCreatedRef.current = true
+        const title = `终端 ${++seqRef.current}`
+        setActiveId((current) => current ?? leafId)
+        return [...prev, { id: leafId, title, state: 'active' }]
+      })
+    })
+
     const offError = window.rpty.onError(({ code, message }) => {
       setError(message ? `${message}（${code}）` : code)
     })
@@ -82,6 +107,7 @@ export default function App(): React.JSX.Element {
       offStatus()
       offState()
       offExit()
+      offAdopted()
       offError()
       offReadOnly()
     }
@@ -154,14 +180,19 @@ export default function App(): React.JSX.Element {
     [sessions]
   )
 
-  // 连上且被控端在线但没有终端时，自动开一个（只自动开一次，
-  // 失败回滚成 0 个时不再反复重建）。
+  // 连上且被控端在线但没有终端时，自动开一个。
+  // 但要先给「镜像别人已有会话」一点时间：relay 一接上就会回 SESSION_LIST，
+  // 如果这里抢在前面 create，就会凭空多出一个自己的终端，同步就没了。
   useEffect(() => {
     if (autoCreatedRef.current) return
-    if (status.phase === 'online' && status.agentOnline && sessions.length === 0) {
+    if (status.phase !== 'online' || !status.agentOnline) return
+    const timer = setTimeout(() => {
+      if (autoCreatedRef.current) return
+      if (sessionsRef.current.length > 0) return
       autoCreatedRef.current = true
       void createSession()
-    }
+    }, 700)
+    return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status.phase, status.agentOnline, sessions.length])
 

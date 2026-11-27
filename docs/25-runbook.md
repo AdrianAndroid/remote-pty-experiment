@@ -18,6 +18,21 @@ MacBook Pro（随身）               阿里云 8.152.204.58             家里 
 - relay 只做字节配对，不解析终端流，不存会话状态。会话 token 由客户端生成。
 - 两端都是**主动出站**，Mac mini 不监听任何端口。
 
+### 1.1 多端镜像（同一块终端）
+
+`/d/<token>` 是 **1:N 多播**：一条 agent 侧连接（`?role=agent`）+ 任意多条控制端连接
+（`?role=ctl`）。谁敲键盘都进同一个 PTY，agent 的输出广播给所有端 —— 多个客户端看到的是
+同一块屏幕、同一个 shell 进程（`echo $$` 两边一样）。
+
+- 新客户端连上时，relay 先回缓存的 `SESSION_LIST`，客户端据此 **attach 已有会话**而不是
+  新建；`SESSION_LIST` 里出现本地没有的会话就自动挂上去。
+- 新 viewer 的历史由 `VIEWER_JOINED`（走 `/agent` 信令）→ `SESSION_SNAPSHOT`（base64，
+  带 cid）补一份环形缓冲，relay 定向只投给这个新 viewer。快照前到得太早的增量先排队。
+- **尺寸由建会话的那一端（owner）决定**，镜像端不发 `SESSION_RESIZE`，否则多端会互相拉扯。
+- 只读开关（`⌘⇧L`）仍保留：镜像端可以只看不动。
+- 坑：`VIEWER_JOINED` 这类信令**必须走 `/agent`**，发到数据通道里会被 agent 当成键盘
+  输入打进 PTY，终端上直接出现一行 JSON。
+
 ## 二、域名与证书
 
 - 域名：`rpty.zhaojian.xin` → `8.152.204.58`（阿里云 A 记录）

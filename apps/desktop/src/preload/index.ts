@@ -36,6 +36,8 @@ const bridge: RptyBridge = {
     ipcRenderer.send(IpcChannel.SessionResize, { leafId, cols, rows }),
   close: (leafId: string) => ipcRenderer.invoke(IpcChannel.SessionClose, leafId),
   list: () => ipcRenderer.invoke(IpcChannel.SessionList),
+  snapshotSessions: () => ipcRenderer.invoke(IpcChannel.SessionSnapshot),
+  ready: (leafId: string) => ipcRenderer.send(IpcChannel.SessionReady, leafId),
 
   getReadOnly: (): Promise<boolean> => ipcRenderer.invoke(IpcChannel.ReadOnlyGet),
   setReadOnly: (readOnly: boolean): Promise<boolean> =>
@@ -45,6 +47,7 @@ const bridge: RptyBridge = {
   onData: subscribe(IpcChannel.SessionData),
   onState: subscribe(IpcChannel.SessionStateChanged),
   onExit: subscribe(IpcChannel.SessionExit),
+  onAdopted: subscribe(IpcChannel.SessionAdopted),
   onStatus: subscribe<RelayStatus>(IpcChannel.RelayStatusChanged),
   onError: subscribe(IpcChannel.RelayError),
   onMenu: (handler: (command: MenuCommand, arg?: number) => void) => {

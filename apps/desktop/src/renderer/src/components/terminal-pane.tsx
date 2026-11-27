@@ -104,6 +104,9 @@ export function TerminalPane({
       if (incoming === leafId) term.write(data)
     })
 
+    // 订阅建好之后再通知主进程「可以灌了」，这样攒住的快照和增量才有人接。
+    window.rpty.ready(leafId)
+
     const observer = new ResizeObserver(() => {
       if (!active) return
       try {

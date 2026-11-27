@@ -27,6 +27,8 @@ interface RemoteSession {
   dataTimer: NodeJS.Timeout | null
   /** 数据通道还没连上时收到的写入，先攒着。 */
   pending: Buffer[]
+  /** true = 这个 PTY 是本端建的（能改尺寸、能重连时补 SESSION_CREATE）；false = 镜像别人的。 */
+  owned: boolean
 }
 
 export interface RelayHandlers {
@@ -34,6 +36,7 @@ export interface RelayHandlers {
   onData(leafId: string, data: Uint8Array): void
   onState(leafId: string, state: SessionState, message?: string): void
   onExit(leafId: string, exitCode?: number): void
+  onAdopted(leafId: string, sessionId: string, cols: number, rows: number): void
   onError(code: string, message: string): void
 }
 
@@ -49,6 +52,12 @@ export class RelayClient {
   private agentOnline = false
   private hostname = ''
   private backoff = 600
+  /**
+   * 渲染层的 xterm 是后挂载的（窗口加载晚于 relay 连接），早到的字节必须先攒住，
+   * 否则新挂上来的镜像端会是一片空白 —— 尤其是快照，一来就一次性发完。
+   */
+  private readyLeaves = new Set<string>()
+  private buffered = new Map<string, Buffer[]>()
   /** 只读：连上了、画面在刷，但键盘输入与尺寸变更都不发给被控端。 */
   private readOnly = false
   private reconnectTimer: NodeJS.Timeout | null = null
@@ -245,6 +254,7 @@ export class RelayClient {
             hostname: host
           })
         }
+        this.syncFromList(msg.sessions)
         break
       }
 
@@ -289,13 +299,17 @@ export class RelayClient {
     if (!this.agentOnline) return
     for (const session of this.sessions.values()) {
       if (session.state === 'exited') continue
-      this.sendSignal({
-        type: 'SESSION_CREATE',
-        session_id: session.sessionId,
-        data_token: session.dataToken,
-        cols: session.cols,
-        rows: session.rows
-      })
+      if (session.owned) {
+        // 只有自己建的才补 SESSION_CREATE；镜像别人的会话一旦回补，
+        // 万一 agent 那边已经没了，就等于凭空再造一个 PTY，语义全错。
+        this.sendSignal({
+          type: 'SESSION_CREATE',
+          session_id: session.sessionId,
+          data_token: session.dataToken,
+          cols: session.cols,
+          rows: session.rows
+        })
+      }
       this.openData(session)
     }
   }
@@ -307,6 +321,64 @@ export class RelayClient {
     } catch {
       // 发送失败由 close 事件兜底。
     }
+  }
+
+  /**
+   * 被控端上已经有会话（通常是另一个客户端开的）就挂上去当 viewer。
+   *
+   * 这才是「同步」：两个窗口看的是同一个 PTY，谁敲键盘都进同一个 shell，
+   * 画面一模一样。不是各开一个、各看各的。
+   */
+  private syncFromList(raw: unknown): void {
+    if (!Array.isArray(raw)) return
+    const seen = new Set<string>()
+    for (const item of raw) {
+      if (!item || typeof item !== 'object') continue
+      const entry = item as Record<string, unknown>
+      const sid = String(entry.session_id ?? '')
+      const token = String(entry.data_token ?? '')
+      if (!sid || !token) continue
+      seen.add(sid)
+      if (this.bySessionId.has(sid)) continue
+      this.adopt(
+        sid,
+        token,
+        Number(entry.cols ?? 80) || 80,
+        Number(entry.rows ?? 24) || 24
+      )
+    }
+
+    // 镜像的会话在远端没了（另一端关掉了），这边如实下线，别留着死标签骗人。
+    for (const session of [...this.sessions.values()]) {
+      if (session.owned || seen.has(session.sessionId)) continue
+      session.state = 'exited'
+      this.handlers.onExit(session.leafId)
+      this.closeData(session)
+      this.sessions.delete(session.leafId)
+      this.bySessionId.delete(session.sessionId)
+    }
+  }
+
+  private adopt(sessionId: string, dataToken: string, cols: number, rows: number): void {
+    // 镜像会话直接用 sessionId 当 leafId：它本来就在全局唯一，不需要再造一个。
+    const leafId = sessionId
+    if (this.sessions.has(leafId)) return
+    const session: RemoteSession = {
+      leafId,
+      sessionId,
+      dataToken,
+      cols,
+      rows,
+      state: 'active',
+      dataWs: null,
+      dataTimer: null,
+      pending: [],
+      owned: false
+    }
+    this.sessions.set(leafId, session)
+    this.bySessionId.set(sessionId, session)
+    this.handlers.onAdopted(leafId, sessionId, cols, rows)
+    this.openData(session)
   }
 
   // ------------------------------------------------------------ 会话
@@ -332,7 +404,8 @@ export class RelayClient {
       state: 'connecting',
       dataWs: null,
       dataTimer: null,
-      pending: []
+      pending: [],
+      owned: true
     }
     this.sessions.set(leafId, session)
     this.bySessionId.set(sessionId, session)
@@ -379,6 +452,8 @@ export class RelayClient {
     if (this.readOnly) return
     const session = this.sessions.get(leafId)
     if (!session) return
+    // 镜像端不改被控端的 PTY 尺寸：多端尺寸不同会互相拉扯，画面来回跳。
+    if (!session.owned) return
     if (session.cols === cols && session.rows === rows) return
     session.cols = cols
     session.rows = rows
@@ -394,10 +469,36 @@ export class RelayClient {
     this.closeData(session)
     this.sessions.delete(leafId)
     this.bySessionId.delete(session.sessionId)
+    this.readyLeaves.delete(leafId)
+    this.buffered.delete(leafId)
   }
 
   list(): string[] {
     return [...this.sessions.keys()]
+  }
+
+  /** 渲染层面板就绪：把攒下的字节按到达顺序吐出去，之后转为实时推送。 */
+  markReady(leafId: string): void {
+    if (!this.sessions.has(leafId)) return
+    this.readyLeaves.add(leafId)
+    const queue = this.buffered.get(leafId)
+    if (!queue) return
+    this.buffered.delete(leafId)
+    for (const chunk of queue) {
+      this.handlers.onData(leafId, new Uint8Array(chunk))
+    }
+  }
+
+  /** 当前所有会话的完整信息，供后加载的渲染层一次性补齐标签。 */
+  snapshot(): Array<{ leafId: string; sessionId: string; cols: number; rows: number }> {
+    return [...this.sessions.values()]
+      .filter((session) => session.state !== 'exited')
+      .map((session) => ({
+        leafId: session.leafId,
+        sessionId: session.sessionId,
+        cols: session.cols,
+        rows: session.rows
+      }))
   }
 
   // ------------------------------------------------------------ 数据通道
@@ -406,7 +507,7 @@ export class RelayClient {
     if (session.dataWs && session.dataWs.readyState <= WebSocket.OPEN) return
     this.closeData(session)
 
-    const ws = new WebSocket(this.wsUrl(`/d/${session.dataToken}`), {
+    const ws = new WebSocket(this.wsUrl(`/d/${session.dataToken}?role=ctl`), {
       handshakeTimeout: CONNECT_TIMEOUT,
       perMessageDeflate: false
     })
@@ -429,8 +530,19 @@ export class RelayClient {
 
     ws.on('message', (raw, isBinary) => {
       if (!isBinary) return
-      const buf = raw as Buffer
       // 复制一份，避免底层 buffer 被复用后渲染层拿到脏数据。
+      const buf = Buffer.from(raw as Buffer)
+      if (!this.readyLeaves.has(session.leafId)) {
+        const queue = this.buffered.get(session.leafId) ?? []
+        // 上限 1MB，超了从头丢：宁可少一段历史也不能把内存吃干。
+        queue.push(buf)
+        let total = queue.reduce((sum, item) => sum + item.length, 0)
+        while (total > 1024 * 1024 && queue.length > 1) {
+          total -= queue.shift()!.length
+        }
+        this.buffered.set(session.leafId, queue)
+        return
+      }
       this.handlers.onData(session.leafId, new Uint8Array(buf))
     })
 

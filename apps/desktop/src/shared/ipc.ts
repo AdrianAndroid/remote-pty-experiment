@@ -24,6 +24,10 @@ export const IpcChannel = {
   SessionResize: 'session:resize',
   SessionClose: 'session:close',
   SessionList: 'session:list',
+  /** 渲染 -> 主：拉当前所有会话（窗口加载晚于 relay 连接时，adopt 事件已经过去了） */
+  SessionSnapshot: 'session:snapshot',
+  /** 渲染 -> 主：这个面板的 xterm 已经挂好了，可以开始灌字节 */
+  SessionReady: 'session:ready',
 
   /** 只读模式：渲染 -> 主 查询/切换，主 -> 渲染 广播 */
   ReadOnlyGet: 'readonly:get',
@@ -31,6 +35,8 @@ export const IpcChannel = {
   ReadOnlyChanged: 'readonly:changed',
 
   /** 主 -> 渲染：推送 */
+  /** 主 -> 渲染：发现被控端上已有会话（别的客户端开的），自动挂上去镜像 */
+  SessionAdopted: 'session:adopted',
   SessionData: 'session:data',
   SessionStateChanged: 'session:state',
   SessionExit: 'session:exit',
@@ -89,6 +95,13 @@ export interface SessionStatePayload {
   message?: string
 }
 
+export interface SessionAdoptedPayload {
+  leafId: string
+  sessionId: string
+  cols: number
+  rows: number
+}
+
 export interface SessionExitPayload {
   leafId: string
   exitCode?: number
@@ -111,6 +124,8 @@ export interface RptyBridge {
   resize(leafId: string, cols: number, rows: number): void
   close(leafId: string): Promise<void>
   list(): Promise<string[]>
+  snapshotSessions(): Promise<SessionAdoptedPayload[]>
+  ready(leafId: string): void
 
   /** 只读：连上了、画面在刷，但键盘/粘贴/尺寸都不发给被控端 */
   getReadOnly(): Promise<boolean>
@@ -120,6 +135,7 @@ export interface RptyBridge {
   onData(handler: (payload: SessionDataPayload) => void): () => void
   onState(handler: (payload: SessionStatePayload) => void): () => void
   onExit(handler: (payload: SessionExitPayload) => void): () => void
+  onAdopted(handler: (payload: SessionAdoptedPayload) => void): () => void
   onStatus(handler: (payload: RelayStatus) => void): () => void
   onError(handler: (payload: RelayErrorPayload) => void): () => void
   onMenu(handler: (command: MenuCommand, arg?: number) => void): () => void

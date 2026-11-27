@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import fcntl
 import json
 import logging
@@ -175,7 +176,11 @@ class Session:
     # ------------------------------------------------------------ 数据通道
 
     async def run_data(self, url: str, notify) -> None:
-        """维护 /d/<token>；断了就重连，重连时重放环形缓冲。"""
+        """维护 /d/<token> 的 agent 侧连接；断了就重连。
+
+        历史不再从这里重放 —— 多播通道下会把老画面重复推给已经在看的端。
+        新 viewer 要历史，走 VIEWER_JOINED -> SESSION_SNAPSHOT 那条定向路径。
+        """
         drain = asyncio.create_task(self.drain_loop())
         try:
             while not self.closed:
@@ -183,8 +188,6 @@ class Session:
                     async with websockets.connect(url, max_size=None, ping_interval=20, proxy=None) as ws:
                         self.ws = ws
                         LOG.info("会话 %s 数据通道已连", self.sid[:8])
-                        if self.buffer:
-                            await ws.send(bytes(self.buffer))
                         async for message in ws:
                             if isinstance(message, str):
                                 message = message.encode("utf-8")
@@ -249,7 +252,8 @@ class Agent:
         return f"{self.relay}/agent?token={self.token}"
 
     def data_url(self, data_token: str) -> str:
-        return f"{self.relay}/d/{data_token}?token={self.token}"
+        # role=agent 区分多播通道的两侧：别的客户端都以 role=ctl 挂进来当 viewer。
+        return f"{self.relay}/d/{data_token}?role=agent&token={self.token}"
 
     # ------------------------------------------------------------ 主循环
 
@@ -321,6 +325,8 @@ class Agent:
             session = self.sessions.get(sid)
             if session is not None:
                 session.resize(message.get("cols"), message.get("rows"))
+        elif kind == "VIEWER_JOINED":
+            await self.on_viewer_joined(message)
         elif kind == "CTL_ONLINE":
             LOG.info("控制端已上线")
             # 控制端刚连上时收不到之前发的 SESSION_LIST，这里补一份，
@@ -338,6 +344,42 @@ class Agent:
             await self.ws.send(json.dumps(payload, ensure_ascii=False))
         except ConnectionClosed:
             pass
+
+    async def on_viewer_joined(self, message: Dict[str, Any]) -> None:
+        """有新客户端挂到这个会话：把环形缓冲当「当前屏幕」补给它。
+
+        多播通道里没法只对某一个人说话，所以快照走信令、带 cid 让 relay 定向投。
+        """
+        data_token = str(message.get("data_token") or "")
+        cid = str(message.get("cid") or "")
+        if not cid:
+            return
+
+        target = None
+        for session in self.sessions.values():
+            if session.token == data_token and not session.closed:
+                target = session
+                break
+
+        # 哪怕没有历史也必须回一条，否则 relay 那边这个 viewer 会一直等快照、增量全卡住。
+        payload: Dict[str, Any] = {
+            "type": "SESSION_SNAPSHOT",
+            "cid": cid,
+            "data_token": data_token,
+            "data": "",
+        }
+        if target is not None:
+            payload["session_id"] = target.sid
+            payload["data"] = base64.b64encode(bytes(target.buffer)).decode("ascii")
+            LOG.info(
+                "给新 viewer %s 补快照 %d 字节（会话 %s）",
+                cid,
+                len(target.buffer),
+                target.sid[:8],
+            )
+        else:
+            LOG.warning("VIEWER_JOINED 找不到会话 token=%s", data_token[:8])
+        await self.reply(payload)
 
     # ------------------------------------------------------------ 会话
 
@@ -407,6 +449,8 @@ class Agent:
                 "title": os.path.basename(shell),
             }
         )
+        # 让所有在线的控制端都发现这个新终端 —— 镜像模式下大家看同一批会话。
+        await self.send_session_list()
 
     def drop_session(self, sid: str) -> None:
         """PTY 自己退出后清表，避免 sessions 里堆一堆死会话。"""
@@ -414,6 +458,14 @@ class Agent:
         task = self.tasks.pop(sid, None)
         if task is not None:
             task.cancel()
+        self.notify_list_changed()
+
+    def notify_list_changed(self) -> None:
+        """会话增减后广播一次列表；这是同步回调，不能直接 await。"""
+        try:
+            asyncio.get_running_loop().create_task(self.send_session_list())
+        except RuntimeError:
+            pass
 
     def on_close(self, sid: str) -> None:
         session = self.sessions.pop(sid, None)
@@ -423,6 +475,7 @@ class Agent:
         task = self.tasks.pop(sid, None)
         if task is not None:
             task.cancel()
+        self.notify_list_changed()
 
 
 async def amain() -> None:
