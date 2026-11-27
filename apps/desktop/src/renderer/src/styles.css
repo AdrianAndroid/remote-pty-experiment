@@ -419,6 +419,7 @@ code {
   align-items: center;
   justify-content: center;
   height: 100%;
+  -webkit-app-region: drag;
   background: radial-gradient(700px 400px at 50% 0%, #171a26 0%, var(--bg) 70%);
 }
 
@@ -799,9 +800,11 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 22px;
+  /* 左边给 macOS 红绿灯留位，这一条整条可以拖动窗口 */
+  padding: 14px 18px 14px 92px;
   border-bottom: 1px solid var(--line-soft);
   background: var(--bg-side);
+  -webkit-app-region: drag;
 }
 
 .devices__brand {
@@ -851,6 +854,7 @@ code {
 .devices__actions {
   display: flex;
   gap: 8px;
+  -webkit-app-region: no-drag;
 }
 
 .devices__ghost {
