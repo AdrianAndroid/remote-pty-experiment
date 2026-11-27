@@ -6,6 +6,7 @@
  */
 
 import type { NodeInfo } from '../../../shared/ipc'
+import { deviceLabel, deviceLabelParts } from '../lib/device-label'
 
 interface DevicesScreenProps {
   nodes: NodeInfo[]
@@ -20,10 +21,6 @@ interface DevicesScreenProps {
   clientName?: string
 }
 
-function pretty(name: string): string {
-  return name.replace(/\.local$/, '')
-}
-
 export function DevicesScreen({
   nodes,
   online,
@@ -35,12 +32,6 @@ export function DevicesScreen({
   clientName = ''
 }: DevicesScreenProps): React.JSX.Element {
   const sorted = [...nodes].sort((a, b) => Number(b.online) - Number(a.online))
-  // 同一台机器跑多个 agent 时显示名会一样，靠 id 尾段区分；名字唯一时不显示，保持干净
-  const nameCount = new Map<string, number>()
-  // 按“人看到的名字”判重，而不是原始 name：`x` 与 `x.local` 在界面上一样，也算撞车
-  for (const node of sorted) nameCount.set(pretty(node.name), (nameCount.get(pretty(node.name)) ?? 0) + 1)
-  // 只认「-<4 位 hex>」这种自动生成的后缀；人工起的节点名（如主机名本身）不硬拆
-  const tail = (id: string): string => /-([0-9a-f]{4})$/.exec(id)?.[1] ?? ''
 
   return (
     <div className="devices">
@@ -91,23 +82,20 @@ export function DevicesScreen({
                   onClick={() => onPick(node.node)}
                   title={
                     node.online
-                      ? `进入 ${pretty(node.name)}`
-                      : `${pretty(node.name)} 当前离线，连不进去`
+                      ? `进入 ${deviceLabel(node)}`
+                      : `${deviceLabel(node)} 当前离线，连不进去`
                   }
                 >
                   <span className={node.online ? 'devicecard__dot' : 'devicecard__dot devicecard__dot--off'} />
                   <span className="devicecard__main">
                     <span className="devicecard__name">
-                      {pretty(node.name)}
-                      {(nameCount.get(pretty(node.name)) ?? 0) > 1 && tail(node.node) && (
-                        <em className="devicecard__badge devicecard__badge--id">{tail(node.node)}</em>
-                      )}
+                      {deviceLabelParts(node).base}
+                      <em className="devicecard__badge devicecard__badge--id">
+                        {deviceLabelParts(node).code}
+                      </em>
                     </span>
                     <span className="devicecard__meta">
                       {node.online ? `${node.sessions} 个终端` : '离线'}
-                      {(nameCount.get(pretty(node.name)) ?? 0) > 1 &&
-                        pretty(node.node) !== pretty(node.name) &&
-                        ` · ${node.node}`}
                     </span>
                   </span>
                   <span className="devicecard__go">{node.online ? '进入 →' : ''}</span>

@@ -17,6 +17,7 @@ import { SessionList, type SessionMeta } from './components/session-list'
 import { TerminalPane } from './components/terminal-pane'
 import { ConnectScreen } from './screens/connect'
 import { DevicesScreen } from './screens/devices'
+import { deviceLabel } from './lib/device-label'
 
 const MAX_SESSIONS = 20
 
@@ -587,7 +588,7 @@ export default function App(): React.JSX.Element {
   const showWorkspace = activeNode !== null && (online || sessions.length > 0)
   // 侧栏显示的是「现在这台设备」，不是本机名
   const activeDevice = (status.nodes ?? []).find((item) => item.node === activeNode)
-  const deviceName = activeDevice?.name ?? activeNode ?? ''
+  const deviceName = activeDevice ? deviceLabel(activeDevice) : (activeNode ?? '')
 
   if (detached || !showWorkspace) {
     return (

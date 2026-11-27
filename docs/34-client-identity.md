@@ -54,3 +54,16 @@
 「已连接中继 · 我 · <client-name>」负责。设备名撞车时（比如同机两个 agent 都叫
 `zhaojiandeMac-mini`），副行补上节点 id（`0 个终端 · default`）区分，判重也改成按
 "人看到的名字"算，`x` 与 `x.local` 不再被当成两台不同名字。
+
+## 设备卡片也换成唯一名
+
+上一版卡片直接写 agent 上报的 `name`（主机名），同机两个 agent 就是两行一模一样的
+`zhaojiandeMac-mini`，「本机」又猜不准 —— 等于没标识。
+
+现在卡片标题统一成「主机短名 + 4 位码」，和客户端名字一个格式：
+
+- 节点 id 自带 `<host>-<hex4>` 尾段（agent 自己起的）就直接用那段；
+- 节点 id 是人工起的（如 `default`）就按 id 算一个稳定 4 位码（FNV-1a），重启/重连不变。
+
+实测：`zhaojiandeMac-mini 933b`（default 节点）与 `zhaojiandeMac-mini 7b59`，进工作区后
+侧栏「设备」也显示同一个名字。
