@@ -714,6 +714,15 @@ export default function App(): React.JSX.Element {
         onPick={(host, clientId) => void enterDevice(host, clientId)}
         onExitRelay={() => void handleDisconnect()}
         onReload={() => void window.rpty.getStatus().then(setStatus)}
+        onOpenMine={
+          ownHostNode
+            ? () => {
+                // 回自己的桌面：不带配对目标，main 侧也会跳过自配
+                ownEnteredRef.current = true
+                void enterDevice(ownHostNode, status.clientId ?? null)
+              }
+            : undefined
+        }
       />
     )
   }

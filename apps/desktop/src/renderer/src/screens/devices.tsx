@@ -25,6 +25,8 @@ interface DevicesScreenProps {
   onPick: (host: string, clientId: string) => void
   onExitRelay: () => void
   onReload: () => void
+  /** 回到自己的终端（「我」那条不给点，但总得有条路回去） */
+  onOpenMine?: () => void
 }
 
 export function DevicesScreen({
@@ -36,7 +38,8 @@ export function DevicesScreen({
   error,
   onPick,
   onExitRelay,
-  onReload
+  onReload,
+  onOpenMine
 }: DevicesScreenProps): React.JSX.Element {
   // 「我」永远排第一，其余按"有宿主可进"优先
   const sorted = [...clients].sort((a, b) => {
@@ -58,6 +61,16 @@ export function DevicesScreen({
           </div>
         </div>
         <div className="devices__actions">
+          {onOpenMine && (
+            <button
+              type="button"
+              className="devices__ghost devices__ghost--mine"
+              onClick={onOpenMine}
+              title="打开我自己的终端（⌘T 新建也在这里）"
+            >
+              我的终端
+            </button>
+          )}
           <button type="button" className="devices__ghost" onClick={onReload} title="重新拉一次在线列表">
             刷新
           </button>

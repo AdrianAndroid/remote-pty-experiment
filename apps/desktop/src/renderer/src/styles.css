@@ -1088,3 +1088,9 @@ code {
   line-height: 15px;
   vertical-align: 1px;
 }
+
+/* 列表页「我的终端」：从列表回自己桌面（「我」那条不给点，路得留一条） */
+.devices__ghost--mine {
+  color: #9ad0ff;
+  border-color: rgba(154, 208, 255, 0.35);
+}
