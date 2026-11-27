@@ -28,8 +28,8 @@ const relay = new RelayClient({
   onState: (leafId, state, message) =>
     send(IpcChannel.SessionStateChanged, { leafId, state, message }),
   onExit: (leafId, exitCode) => send(IpcChannel.SessionExit, { leafId, exitCode }),
-  onAdopted: (leafId, sessionId, cols, rows, owned, index) =>
-    send(IpcChannel.SessionAdopted, { leafId, sessionId, cols, rows, owned, index }),
+  onAdopted: (leafId, sessionId, cols, rows, owned, index, node) =>
+    send(IpcChannel.SessionAdopted, { leafId, sessionId, cols, rows, owned, index, node }),
   onError: (code, message) => send(IpcChannel.RelayError, { code, message })
 })
 
@@ -186,7 +186,13 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.RelayStatus, () => relay.status)
 
   ipcMain.handle(IpcChannel.SessionCreate, async (_event, options) => {
-    const result = await relay.create(options.leafId, options.cols, options.rows, options.shell)
+    const result = await relay.create(
+      options.leafId,
+      options.cols,
+      options.rows,
+      options.shell,
+      options.target
+    )
     return result.ok
       ? { ok: true, sessionId: result.sessionId }
       : { ok: false, error: result.error }

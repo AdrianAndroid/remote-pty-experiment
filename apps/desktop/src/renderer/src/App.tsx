@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ConfigInfo, MenuCommand, RelayStatus } from '../../shared/ipc'
+import type { ConfigInfo, MenuCommand, NodeInfo, RelayStatus } from '../../shared/ipc'
 import type { SessionState } from '../../shared/protocol'
 import { SessionList, type SessionMeta } from './components/session-list'
 import { TerminalPane } from './components/terminal-pane'
@@ -34,6 +34,11 @@ export default function App(): React.JSX.Element {
   const [busy, setBusy] = useState(false)
   const [readOnly, setReadOnly] = useState(false)
   const [error, setError] = useState('')
+  /** 多台机器在线时，新建终端要先问一句开在哪台 */
+  const [picker, setPicker] = useState<NodeInfo[] | null>(null)
+
+  const statusRef = useRef(status)
+  statusRef.current = status
 
   const seqRef = useRef(0)
   const autoCreatedRef = useRef(false)
@@ -67,7 +72,8 @@ export default function App(): React.JSX.Element {
               state: 'active' as const,
               owned: item.owned,
               cols: item.cols,
-              rows: item.rows
+              rows: item.rows,
+              node: item.node
             }
           })
         if (added.length === 0) return prev
@@ -98,14 +104,14 @@ export default function App(): React.JSX.Element {
     })
 
     // 被控端上已有会话（另一个客户端开的）：不新建，直接挂上去镜像同一块终端。
-    const offAdopted = window.rpty.onAdopted(({ leafId, owned, index, cols, rows }) => {
+    const offAdopted = window.rpty.onAdopted(({ leafId, owned, index, cols, rows, node }) => {
       setSessions((prev) => {
         if (prev.some((item) => item.id === leafId)) return prev
         autoCreatedRef.current = true
         if (index > seqRef.current) seqRef.current = index
         const title = `终端 ${index || ++seqRef.current}`
         setActiveId((current) => current ?? leafId)
-        return [...prev, { id: leafId, title, state: 'active', owned, cols, rows }]
+        return [...prev, { id: leafId, title, state: 'active', owned, cols, rows, node }]
       })
     })
 
@@ -135,7 +141,7 @@ export default function App(): React.JSX.Element {
 
   // ---------------------------------------------------------- 会话操作
 
-  const createSession = useCallback(async () => {
+  const createSession = useCallback(async (target?: string) => {
     if (sessionsRef.current.length >= MAX_SESSIONS) {
       setError(`最多 ${MAX_SESSIONS} 个终端`)
       return
@@ -148,15 +154,30 @@ export default function App(): React.JSX.Element {
     // 各自走自己的 IPC，不会因为上一发还没回来就被吃掉。
     setSessions((prev) => [
       ...prev,
-      { id: leafId, title, state: 'connecting', owned: true }
+      { id: leafId, title, state: 'connecting', owned: true, node: target }
     ])
     setActiveId(leafId)
-    const result = await window.rpty.create({ leafId, cols, rows })
+    const result = await window.rpty.create({ leafId, cols, rows, target })
     if (!result.ok) {
       setSessions((prev) => prev.filter((item) => item.id !== leafId))
       setError(result.error ?? '创建终端失败')
     }
   }, [])
+
+  /**
+   * 「新建终端」的统一入口：只有一台机器在线就直接开，多台就先问。
+   *
+   * 不做「默认开在上一台」这种猜测 —— 开错机器的代价是别人机器上多了个 shell。
+   */
+  const requestCreate = useCallback(() => {
+    const online = (statusRef.current.nodes ?? []).filter((item) => item.online)
+    if (online.length <= 1) {
+      void createSession(online[0]?.node)
+      return
+    }
+    setError('')
+    setPicker(online)
+  }, [createSession])
 
   const closeSession = useCallback(
     async (leafId: string) => {
@@ -217,7 +238,7 @@ export default function App(): React.JSX.Element {
     const offMenu = window.rpty.onMenu((command: MenuCommand, arg?: number) => {
       switch (command) {
         case 'new-tab':
-          void createSession()
+          requestCreate()
           break
         case 'close-tab':
           if (activeIdRef.current) void closeSession(activeIdRef.current)
@@ -242,7 +263,7 @@ export default function App(): React.JSX.Element {
       }
     })
     return offMenu
-  }, [createSession, closeSession, stepTab, gotoTab, toggleReadOnly])
+  }, [requestCreate, createSession, closeSession, stepTab, gotoTab, toggleReadOnly])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -312,7 +333,7 @@ export default function App(): React.JSX.Element {
         hostname={status.hostname ?? ''}
         readOnly={readOnly}
         onSelect={setActiveId}
-        onCreate={() => void createSession()}
+        onCreate={requestCreate}
         onClose={(id) => void closeSession(id)}
         onRename={renameSession}
         onToggle={() => setCollapsed((value) => !value)}
@@ -341,7 +362,7 @@ export default function App(): React.JSX.Element {
             <div className="empty">
               <p className="empty__title">还没有终端</p>
               <p className="empty__hint">按 ⌘T 新建一个</p>
-              <button type="button" className="btn btn--primary" onClick={() => void createSession()}>
+              <button type="button" className="btn btn--primary" onClick={requestCreate}>
                 新建终端
               </button>
             </div>
@@ -354,6 +375,37 @@ export default function App(): React.JSX.Element {
           </div>
         )}
       </main>
+
+      {picker && (
+        <div className="picker" role="dialog" aria-label="选择在哪台机器上开终端">
+          <div className="picker__box">
+            <p className="picker__title">在哪里开终端？</p>
+            {picker.map((node) => (
+              <button
+                key={node.node}
+                type="button"
+                className="picker__item"
+                onClick={() => {
+                  setPicker(null)
+                  void createSession(node.node)
+                }}
+              >
+                <span className="picker__name">
+                  {node.name}
+                  {node.local && <em className="picker__local">本机</em>}
+                </span>
+                <span className="picker__meta">
+                  {node.sessions} 个终端
+                  {node.node !== node.name && ` · ${node.node}`}
+                </span>
+              </button>
+            ))}
+            <button type="button" className="picker__cancel" onClick={() => setPicker(null)}>
+              取消
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

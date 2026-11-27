@@ -17,6 +17,8 @@ export interface SessionMeta {
   /** PTY 语言尺寸，镜像端据此锁死 xterm，避免换行错位 */
   cols?: number
   rows?: number
+  /** 这个终端跑在哪台机器上（多节点时才有意义，界面不显示） */
+  node?: string
 }
 
 interface SessionListProps {

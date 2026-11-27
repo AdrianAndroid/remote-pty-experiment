@@ -4,9 +4,12 @@ rpty relay —— 云中继。
 
 三个端点：
 
-    /agent        被控端（PTY 宿主）长连接，JSON 信令
+    /agent        被控端（PTY 宿主）长连接，JSON 信令，?node=<id> 区分节点
     /ctl          控制端长连接，JSON 信令
     /d/<token>    某个会话的数据通道，纯二进制
+
+一台 relay 可以同时挂多个宿主节点（各自一个 node_id），控制端创建终端时用
+target 指定开在哪台。不同节点互不顶替，只有同一个 node_id 重连才算替换。
 
 数据通道是 **1:N 多播**：一个 PTY 只有一条 agent 侧连接（role=agent），
 可以有任意多条控制端连接（role=ctl）。agent 的输出广播给所有 viewer，
@@ -23,7 +26,6 @@ relay 不解析终端字节流、不生成会话 id；token 由控制端生成�
     RPty_TOKEN    必填，agent 与 ctl 共用的共享密钥
     RPty_HOST     默认 127.0.0.1
     RPty_PORT     默认 8765
-    RPty_PAIR_TIMEOUT  数据通道等待配对的秒数，默认 60
 """
 
 from __future__ import annotations
@@ -67,22 +69,48 @@ class Viewer:
 class Channel:
     """一个 data_token 对应的多播通道。"""
 
-    __slots__ = ("agent", "viewers", "owner")
+    __slots__ = ("agent", "viewers", "owner", "node")
 
     def __init__(self) -> None:
         self.agent: Optional[WebSocketServerProtocol] = None
         self.viewers: Dict[str, Viewer] = {}
         # 谁创建的会话谁定尺寸，避免多端互相抢 PTY 的 cols/rows。
         self.owner: Optional[WebSocketServerProtocol] = None
+        # 这条通道的 PTY 属于哪个节点，补快照时才知道该找谁要。
+        self.node: Optional[str] = None
+
+
+class Node:
+    """一台被控机上的宿主进程。"""
+
+    __slots__ = ("node_id", "ws", "name", "platform", "last_list")
+
+    def __init__(self, node_id: str) -> None:
+        self.node_id = node_id
+        self.ws: Optional[WebSocketServerProtocol] = None
+        self.name = node_id
+        self.platform = ""
+        # 最近一次这个节点报上来的会话列表，新控制端一连上就能拿到。
+        self.last_list: Optional[Dict[str, Any]] = None
+
+    def summary(self) -> Dict[str, Any]:
+        sessions = (self.last_list or {}).get("sessions") or []
+        return {
+            "node": self.node_id,
+            "name": self.name,
+            "platform": self.platform,
+            "online": self.ws is not None,
+            "sessions": len(sessions),
+        }
 
 
 class Relay:
-    def __init__(self, token: str, pair_timeout: float = 60.0) -> None:
+    def __init__(self, token: str) -> None:
         self.token = token
-        self.pair_timeout = pair_timeout
 
-        self.agent: Optional[WebSocketServerProtocol] = None
-        # 允许多个控制端同时在线（同一台被控机，多个窗口/多台客户端看同一批会话）。
+        # node_id -> Node，多台机器可以同时在线。
+        self.nodes: Dict[str, Node] = {}
+        # 允许多个控制端同时在线（多个窗口 / 多台客户端看同一批会话）。
         self.ctls: Set[WebSocketServerProtocol] = set()
 
         # data_token -> 多播通道
@@ -93,8 +121,15 @@ class Relay:
 
         # session_id -> data_token，resize 仲裁用
         self.sid_token: Dict[str, str] = {}
-        # 最近一次 agent 报的会话列表，新控制端一连上就先给它，省一个来回。
-        self.last_list: Optional[Dict[str, Any]] = None
+        # session_id -> node_id，客户端没带 target 时也能把信令送回正确的节点
+        self.sid_node: Dict[str, str] = {}
+        # data_token -> node_id：数据通道建起来时若没带 node（老版本 agent），靠它兜底
+        self.token_node: Dict[str, str] = {}
+        # session_id -> relay 分配的编号。宿主进程可能还在自增自己的旧计数，
+        # 广播列表时一律以这里为准，否则多节点下会出现两个「终端 9」。
+        self.sid_index: Dict[str, int] = {}
+        # 全局会话编号：多节点各自从 1 数会撞号，由 relay 统一分配。
+        self.seq = 0
 
         self.started_at = time.time()
         self.stats = {
@@ -126,13 +161,15 @@ class Relay:
     async def process_request(self, path: str, request_headers) -> Any:
         """给 /healthz 一个真正的 HTTP 响应，不动 WebSocket 路径。"""
         if urlparse(path).path == "/healthz":
+            nodes = {nid: n.summary() for nid, n in self.nodes.items()}
             body = json.dumps(
                 {
                     "ok": True,
                     "uptime": int(time.time() - self.started_at),
-                    "agent": self.agent is not None,
+                    "agent": any(n.ws is not None for n in self.nodes.values()),
                     "ctl": len(self.ctls) > 0,
                     "ctls": len(self.ctls),
+                    "nodes": nodes,
                     "channels": len(self.channels),
                     "viewers": sum(len(c.viewers) for c in self.channels.values()),
                     **self.stats,
@@ -154,7 +191,9 @@ class Relay:
             return
 
         if route == "/agent":
-            await self.handle_agent(ws)
+            query = parse_qs(urlparse(path).query)
+            node_id = ((query.get("node") or [""])[0] or "default").strip()
+            await self.handle_agent(ws, node_id)
         elif route == "/ctl":
             await self.handle_ctl(ws)
         elif route.startswith("/d/"):
@@ -164,7 +203,8 @@ class Relay:
                 return
             query = parse_qs(urlparse(path).query)
             role = (query.get("role") or ["ctl"])[0]
-            await self.handle_data(ws, token, role)
+            node_id = (query.get("node") or [""])[0]
+            await self.handle_data(ws, token, role, node_id)
         else:
             await ws.close(code=4004, reason="unknown route")
 
@@ -179,15 +219,29 @@ class Relay:
         for ctl in list(self.ctls):
             await self.send_json(ctl, payload)
 
-    async def handle_agent(self, ws: WebSocketServerProtocol) -> None:
-        previous = self.agent
-        self.agent = ws
+    async def broadcast_nodes(self) -> None:
+        """节点上下线、改名、会话数变化时，把所有节点的概览推给控制端。"""
+        await self.broadcast_ctls(
+            {"type": "NODES", "nodes": [n.summary() for n in self.nodes.values()]}
+        )
+
+    async def handle_agent(self, ws: WebSocketServerProtocol, node_id: str) -> None:
+        node = self.nodes.get(node_id)
+        if node is None:
+            node = Node(node_id)
+            self.nodes[node_id] = node
+
+        previous = node.ws
+        node.ws = ws
         if previous is not None and previous is not ws:
-            LOG.info("agent 重连，顶掉旧连接")
+            LOG.info("节点 %s 重连，顶掉旧连接", node_id)
             await previous.close(code=4002, reason="replaced")
 
-        LOG.info("agent 上线 %s", ws.remote_address)
-        await self.broadcast_ctls({"type": "AGENT_ONLINE", "at": int(time.time())})
+        LOG.info("节点 %s 上线 %s", node_id, ws.remote_address)
+        await self.broadcast_ctls(
+            {"type": "NODE_ONLINE", "node": node_id, "at": int(time.time())}
+        )
+        await self.broadcast_nodes()
 
         try:
             async for raw in ws:
@@ -198,34 +252,67 @@ class Relay:
                     continue
                 if not isinstance(msg, dict):
                     continue
-                if msg.get("type") == "SESSION_SNAPSHOT":
+                kind = msg.get("type")
+
+                if kind == "SESSION_SNAPSHOT":
                     # 快照只补给它要补的那个新 viewer，不能广播，
                     # 否则已经开着画面的端会被历史重画一遍。
                     await self.deliver_snapshot(msg)
                     continue
-                # 顺手记住 session_id -> data_token，resize 仲裁要用。
-                kind = msg.get("type")
+
+                if kind == "HELLO":
+                    node.name = str(msg.get("name") or node_id)
+                    node.platform = str(msg.get("platform") or "")
+                    LOG.info("节点 %s 自报名称 %s / %s", node_id, node.name, node.platform)
+                    await self.broadcast_nodes()
+                    continue
+
+                # 顺手记住 session_id 的归属，resize / close 没带 target 时靠它路由。
                 if kind == "SESSION_CREATED":
                     sid = str(msg.get("session_id") or "")
                     token = str(msg.get("data_token") or "")
                     if sid and token:
                         self.sid_token[sid] = token
+                        self.sid_node[sid] = node_id
+                        self.token_node[token] = node_id
                 elif kind == "SESSION_LIST":
                     for item in msg.get("sessions") or []:
                         if isinstance(item, dict):
+                            # 编号以 relay 为准：老宿主进程会按自己的旧计数上报。
+                            authoritative = self.sid_index.get(str(item.get("session_id") or ""))
+                            if authoritative:
+                                item["index"] = authoritative
                             sid = str(item.get("session_id") or "")
                             token = str(item.get("data_token") or "")
                             if sid and token:
                                 self.sid_token[sid] = token
-                    self.last_list = {**msg, "src": "agent"}
-                await self.broadcast_ctls({**msg, "src": "agent"})
+                                self.sid_node[sid] = node_id
+                                self.token_node[token] = node_id
+                            # relay 重启后 seq 会归零，靠节点上报的最大编号接上，
+                            # 免得新会话和老会话撞号。
+                            idx = item.get("index")
+                            if isinstance(idx, int) and idx > self.seq:
+                                self.seq = idx
+                    node.last_list = {
+                        **msg,
+                        "node": node_id,
+                        "name": node.name,
+                        "src": "agent",
+                    }
+                    # 列表变化往往意味着会话数变了，节点概览跟着更新。
+                    await self.broadcast_ctls(node.last_list)
+                    await self.broadcast_nodes()
+                    continue
+
+                await self.broadcast_ctls({**msg, "node": node_id, "src": "agent"})
         except ConnectionClosed:
             pass
         finally:
-            if self.agent is ws:
-                self.agent = None
-                LOG.info("agent 下线")
-                await self.broadcast_ctls({"type": "AGENT_OFFLINE"})
+            if node.ws is ws:
+                node.ws = None
+                LOG.info("节点 %s 下线", node_id)
+                await self.broadcast_ctls({"type": "NODE_OFFLINE", "node": node_id})
+                await self.broadcast_nodes()
 
     async def handle_ctl(self, ws: WebSocketServerProtocol) -> None:
         self.ctls.add(ws)
@@ -235,18 +322,21 @@ class Relay:
             ws,
             {
                 "type": "HELLO",
-                "agent_online": self.agent is not None,
+                "agent_online": any(n.ws is not None for n in self.nodes.values()),
+                "nodes": [n.summary() for n in self.nodes.values()],
                 "server_time": int(time.time()),
-                "version": "1.2.0",
+                "version": "1.3.0",
             },
         )
-        if self.agent is not None:
-            # 先把上次缓存的列表直接甩给新控制端 —— 它要在几百毫秒内知道
-            # 被控机上已经有谁在开终端，才不会急着自己新建一个。
-            if self.last_list is not None:
-                await self.send_json(ws, self.last_list)
-            # 再让 agent 补发一次权威列表（缓存可能过期：刚关/刚建）。
-            await self.send_json(self.agent, {"type": "CTL_ONLINE"})
+        # 先把各节点缓存的会话列表直接甩给新控制端 —— 它要在几百毫秒内知道
+        # 每台机器上已经有谁在开终端，才不会急着自己新建一个。
+        for node in self.nodes.values():
+            if node.last_list is not None:
+                await self.send_json(ws, node.last_list)
+        # 再让每个节点补发一次权威列表（缓存可能过期：刚关/刚建）。
+        for node in self.nodes.values():
+            if node.ws is not None:
+                await self.send_json(node.ws, {"type": "CTL_ONLINE"})
 
         try:
             async for raw in ws:
@@ -260,13 +350,23 @@ class Relay:
 
                 msg_type = msg.get("type")
                 if msg_type in ("SESSION_CREATE", "SESSION_CLOSE", "SESSION_RESIZE", "PING"):
-                    if self.agent is None:
+                    if msg_type == "PING":
+                        await self.send_json(ws, {"type": "PONG", "at": int(time.time())})
+                        continue
+
+                    node = self.resolve_node(msg)
+                    if node is None or node.ws is None:
                         await self.send_json(
                             ws,
                             {
                                 "type": "ERROR",
-                                "code": "agent_offline",
-                                "message": "被控端不在线",
+                                "code": "node_offline" if msg.get("target") else "no_target",
+                                "message": (
+                                    f"节点 {msg.get('target')} 不在线"
+                                    if msg.get("target")
+                                    else "有多个节点在线，需要指定 target"
+                                ),
+                                "node": msg.get("target"),
                                 "ref": msg.get("request_id"),
                             },
                         )
@@ -277,16 +377,31 @@ class Relay:
                         token = str(msg.get("data_token") or "")
                         if token:
                             self.channels.setdefault(token, Channel()).owner = ws
-                    elif msg_type == "SESSION_RESIZE":
+                        # 编号由 relay 全局分配：多节点各自从 1 数必然撞号。
+                        self.seq += 1
+                        msg["index"] = self.seq
+                        sid = str(msg.get("session_id") or "")
+                        if sid:
+                            self.sid_node[sid] = node.node_id
+                            self.sid_index[sid] = msg["index"]
+                        if token:
+                            self.channels.setdefault(token, Channel()).node = node.node_id
+                        self.stats["sessions_opened"] += 1
+                    else:
                         sid = str(msg.get("session_id") or "")
                         token = self.sid_token.get(sid)
                         channel = self.channels.get(token) if token else None
-                        if channel is not None and channel.owner is not None and channel.owner is not ws:
+                        if (
+                            msg_type == "SESSION_RESIZE"
+                            and channel is not None
+                            and channel.owner is not None
+                            and channel.owner is not ws
+                        ):
                             # 镜像端不改 PTY 尺寸，否则两端会互相拉扯、画面来回跳。
                             LOG.debug("忽略非 owner 的 resize sid=%s", sid[:8])
                             continue
 
-                    await self.send_json(self.agent, {**msg, "src": "ctl"})
+                    await self.send_json(node.ws, {**msg, "src": "ctl"})
                 else:
                     # 其它类型直接回显错误，避免静默吞掉。
                     await self.send_json(
@@ -298,8 +413,29 @@ class Relay:
         finally:
             self.ctls.discard(ws)
             LOG.info("ctl 下线 %s（剩 %d 个）", ws.remote_address, len(self.ctls))
-            if not self.ctls and self.agent is not None:
-                await self.send_json(self.agent, {"type": "CTL_OFFLINE"})
+            if not self.ctls:
+                for node in self.nodes.values():
+                    if node.ws is not None:
+                        await self.send_json(node.ws, {"type": "CTL_OFFLINE"})
+
+    def resolve_node(self, msg: Dict[str, Any]) -> Optional[Node]:
+        """决定这条信令该发给哪个节点。
+
+        优先 target；否则按 session_id 反查（resize/close 常不带 target）；
+        再否则：只有一个节点在线就用它 —— 兼容单机时代的老客户端。
+        """
+        target = str(msg.get("target") or "")
+        if target:
+            return self.nodes.get(target)
+
+        sid = str(msg.get("session_id") or "")
+        if sid:
+            node_id = self.sid_node.get(sid)
+            if node_id:
+                return self.nodes.get(node_id)
+
+        online = [n for n in self.nodes.values() if n.ws is not None]
+        return online[0] if len(online) == 1 else None
 
     # ---------------------------------------------------------------- 数据
 
@@ -315,7 +451,7 @@ class Relay:
             self.channels.pop(token, None)
 
     async def handle_data(
-        self, ws: WebSocketServerProtocol, token: str, role: str
+        self, ws: WebSocketServerProtocol, token: str, role: str, node_id: str = ""
     ) -> None:
         """一个 data_token 下的多播通道。
 
@@ -327,6 +463,15 @@ class Relay:
         if role == "agent":
             previous = channel.agent
             channel.agent = ws
+            # 老版本 agent 的 data_url 不带 node，用 token 反查兜底。
+            if not node_id:
+                node_id = self.token_node.get(token, "")
+                if not node_id:
+                    online = [n for n in self.nodes.values() if n.ws is not None]
+                    if len(online) == 1:
+                        node_id = online[0].node_id
+            if node_id:
+                channel.node = node_id
             if previous is not None and previous is not ws:
                 LOG.info("数据通道 %s 的 agent 重连，顶掉旧连接", token[:8])
                 try:
@@ -361,18 +506,19 @@ class Relay:
         self.viewers[cid] = (token, viewer)
         LOG.info("数据通道 %s viewer %s 加入（共 %d）", token[:8], cid, len(channel.viewers))
 
-        if self.agent is not None:
+        owner_node = self.nodes.get(channel.node or "")
+        if owner_node is not None and owner_node.ws is not None:
             # 请 agent 回一份环形缓冲，只补这个新来的。
             # 注意：必须走信令连接 /agent —— 数据通道里的一切字节都会被当成
             # 键盘输入写进 PTY，信令发到那里就会把 JSON 打到终端上。
             await self.send_json(
-                self.agent, {"type": "VIEWER_JOINED", "data_token": token, "cid": cid}
+                owner_node.ws, {"type": "VIEWER_JOINED", "data_token": token, "cid": cid}
             )
             # 兜底：agent 那边卡住（信令断、会话没了）也不能让 viewer 一直等，
             # 否则它收到的增量会无限期排队，看起来就是「连上了但没画面」。
             asyncio.get_running_loop().call_later(2.5, self._force_ready, cid)
         else:
-            # agent 不在，没有历史可补，直接开始收（等它重连后自动续上）。
+            # 没有历史可补，直接开始收（等它重连后自动续上）。
             viewer.ready = True
 
         try:
@@ -453,14 +599,13 @@ async def main() -> None:
 
     host = os.environ.get("RPty_HOST", "127.0.0.1")
     port = int(os.environ.get("RPty_PORT", "8765"))
-    pair_timeout = float(os.environ.get("RPty_PAIR_TIMEOUT", "60"))
 
     logging.basicConfig(
         level=os.environ.get("RPty_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
-    relay = Relay(token, pair_timeout)
+    relay = Relay(token)
 
     async with websockets.serve(
         relay.handle,

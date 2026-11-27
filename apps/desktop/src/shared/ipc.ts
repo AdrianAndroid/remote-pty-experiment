@@ -60,11 +60,27 @@ export interface RelayConfig {
 
 export type ConnectionPhase = 'idle' | 'connecting' | 'online' | 'offline' | 'error'
 
+/** 一台可被开终端的机器（跑着宿主进程）。 */
+export interface NodeInfo {
+  /** 节点标识，创建会话时作为 target */
+  node: string
+  /** 展示名，通常是主机名 */
+  name: string
+  platform?: string
+  online: boolean
+  /** 这台机器上现有的会话数 */
+  sessions: number
+  /** 是不是本机 —— 由客户端配置推算，relay 不知道 */
+  local?: boolean
+}
+
 export interface RelayStatus {
   phase: ConnectionPhase
   agentOnline: boolean
   /** 被控端上报的主机名，连上后才有 */
   hostname?: string
+  /** 当前在线的所有节点（多机场景） */
+  nodes?: NodeInfo[]
   message?: string
 }
 
@@ -73,6 +89,8 @@ export interface SessionCreateOptions {
   cols: number
   rows: number
   shell?: string
+  /** 在哪个节点上开。省略时由 relay 决定（只有一个节点在线就用它） */
+  target?: string
 }
 
 export interface SessionCreateResult {
@@ -102,8 +120,10 @@ export interface SessionAdoptedPayload {
   rows: number
   /** true = 这个 PTY 是本窗口建的；false = 别的窗口建的，这里只是镜像 */
   owned: boolean
-  /** 被控机上的全局序号，两端标签靠它对齐 */
+  /** 全局序号（relay 分配），所有客户端靠它对齐 */
   index: number
+  /** 这个会话属于哪个节点 */
+  node?: string
 }
 
 export interface SessionExitPayload {

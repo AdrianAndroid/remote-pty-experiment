@@ -33,6 +33,7 @@ import sys
 import termios
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -240,24 +241,29 @@ class Session:
 
 
 class Agent:
-    def __init__(self, relay: str, token: str) -> None:
+    def __init__(self, relay: str, token: str, node_id: str = "") -> None:
         self.relay = relay.rstrip("/")
         self.token = token
         self.sessions: Dict[str, Session] = {}
         self.hostname = socket.gethostname()
+        # 节点标识：relay 用它区分多台被控机。默认取主机名，重名就手动指定。
+        self.node_id = node_id or self.hostname.split(".")[0] or "default"
         self.tasks: Dict[str, asyncio.Task] = {}
         self.ws: Optional[Any] = None
         self.backoff = 1.0
-        # 所有客户端共用一套编号：谁建的都按这个序号显示，两端标签才对得上。
+        # relay 没回 index 时的兜底（老 relay）。正常情况下编号由 relay 全局分配。
         self.seq = 0
 
     @property
     def signal_url(self) -> str:
-        return f"{self.relay}/agent?token={self.token}"
+        return f"{self.relay}/agent?node={quote(self.node_id)}&token={self.token}"
 
     def data_url(self, data_token: str) -> str:
         # role=agent 区分多播通道的两侧：别的客户端都以 role=ctl 挂进来当 viewer。
-        return f"{self.relay}/d/{data_token}?role=agent&token={self.token}"
+        return (
+            f"{self.relay}/d/{data_token}"
+            f"?role=agent&node={quote(self.node_id)}&token={self.token}"
+        )
 
     # ------------------------------------------------------------ 主循环
 
@@ -280,8 +286,17 @@ class Agent:
         async with websockets.connect(self.signal_url, ping_interval=20, max_size=None, proxy=None) as ws:
             self.ws = ws
             self.backoff = 1.0
-            LOG.info("已连上 relay %s", self.relay)
+            LOG.info("已连上 relay %s（node=%s）", self.relay, self.node_id)
 
+            # 先自报身份，relay 才知道这台叫什么、跑在什么平台。
+            await self.reply(
+                {
+                    "type": "HELLO",
+                    "node_id": self.node_id,
+                    "name": self.hostname,
+                    "platform": sys.platform,
+                }
+            )
             # 告知当前已有会话，便于控制端重建标签。
             await self.send_session_list()
 
@@ -297,6 +312,7 @@ class Agent:
             return
         payload = {
             "type": "SESSION_LIST",
+            "node": self.node_id,
             "hostname": self.hostname,
             "platform": sys.platform,
             "sessions": [
@@ -441,8 +457,14 @@ class Agent:
             await self.reply({"type": "ERROR", "code": "pty_failed", "message": str(exc)})
             return
 
-        self.seq += 1
-        session.index = self.seq
+        # 编号由 relay 全局分配（多节点共用一套，避免两台机器都从「终端 1」开始）。
+        # 老 relay 不回 index 时退回本地计数。
+        index = message.get("index")
+        if isinstance(index, int) and index > 0:
+            session.index = index
+        else:
+            self.seq += 1
+            session.index = self.seq
         self.sessions[sid] = session
         task = asyncio.create_task(session.run_data(self.data_url(data_token), self.reply))
         self.tasks[sid] = task
@@ -490,6 +512,11 @@ async def amain() -> None:
     parser.add_argument("--relay", default=os.environ.get("RPty_RELAY", ""), help="wss://host")
     parser.add_argument("--token", default=os.environ.get("RPty_TOKEN", ""), help="共享密钥")
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument(
+        "--node",
+        default=os.environ.get("RPty_NODE", ""),
+        help="节点标识，默认取主机名短名。多台机器必须唯一",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -500,7 +527,7 @@ async def amain() -> None:
     if not args.relay or not args.token:
         sys.exit("启动失败：需要 --relay 与 --token（或 RPty_RELAY / RPty_TOKEN）")
 
-    agent = Agent(args.relay, args.token)
+    agent = Agent(args.relay, args.token, args.node)
 
     loop = asyncio.get_running_loop()
     stop = loop.create_future()

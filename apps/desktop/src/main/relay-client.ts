@@ -12,8 +12,9 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import os from 'node:os'
 import WebSocket from 'ws'
-import type { RelayConfig, RelayStatus } from '../shared/ipc'
+import type { NodeInfo, RelayConfig, RelayStatus } from '../shared/ipc'
 import type { SessionState } from '../shared/protocol'
 
 interface RemoteSession {
@@ -29,6 +30,8 @@ interface RemoteSession {
   pending: Buffer[]
   /** true = 这个 PTY 是本端建的（能改尺寸、能重连时补 SESSION_CREATE）；false = 镜像别人的。 */
   owned: boolean
+  /** 这个 PTY 跑在哪个节点上 */
+  node: string
 }
 
 export interface RelayHandlers {
@@ -42,7 +45,8 @@ export interface RelayHandlers {
     cols: number,
     rows: number,
     owned: boolean,
-    index: number
+    index: number,
+    node: string
   ): void
   onError(code: string, message: string): void
 }
@@ -58,6 +62,10 @@ export class RelayClient {
   private phase: RelayStatus['phase'] = 'idle'
   private agentOnline = false
   private hostname = ''
+  /** 当前在线的节点列表（多机）。单机时只有一项。 */
+  private nodes: NodeInfo[] = []
+  /** 本机节点标识，用来判断「本机共享」是否可用。默认取主机名短名。 */
+  private readonly localNode = os.hostname().split('.')[0]
   private backoff = 600
   /**
    * 渲染层的 xterm 是后挂载的（窗口加载晚于 relay 连接），早到的字节必须先攒住，
@@ -79,12 +87,23 @@ export class RelayClient {
   // ------------------------------------------------------------ 状态
 
   get status(): RelayStatus {
-    return { phase: this.phase, agentOnline: this.agentOnline, hostname: this.hostname }
+    return {
+      phase: this.phase,
+      agentOnline: this.agentOnline,
+      hostname: this.hostname,
+      nodes: this.nodes
+    }
   }
 
   private setStatus(phase: RelayStatus['phase'], message?: string): void {
     this.phase = phase
-    this.handlers.onStatus({ phase, agentOnline: this.agentOnline, hostname: this.hostname, message })
+    this.handlers.onStatus({
+      phase,
+      agentOnline: this.agentOnline,
+      hostname: this.hostname,
+      nodes: this.nodes,
+      message
+    })
   }
 
   private setAgentOnline(online: boolean): void {
@@ -93,8 +112,43 @@ export class RelayClient {
     this.handlers.onStatus({
       phase: this.phase,
       agentOnline: online,
-      hostname: this.hostname
+      hostname: this.hostname,
+      nodes: this.nodes
     })
+  }
+
+  /**
+   * 更新节点表。
+   *
+   * relay 只在节点上下线、改名、会话数变化时推，不是高频操作。
+   */
+  private updateNodes(raw: unknown): void {
+    if (!Array.isArray(raw)) return
+    this.nodes = raw
+      .filter((x): x is Record<string, unknown> => !!x && typeof x === 'object')
+      .map((n) => ({
+        node: String(n.node ?? ''),
+        name: String(n.name ?? n.node ?? ''),
+        platform: n.platform ? String(n.platform) : undefined,
+        online: Boolean(n.online),
+        sessions: Number(n.sessions ?? 0) || 0,
+        local: String(n.node ?? '') === this.localNode
+      }))
+
+    // 左上角那个「宿主 xxx」：优先本机，其次唯一在线节点，多台非本机时不写死一台。
+    const online = this.nodes.filter((n) => n.online)
+    const local = online.find((n) => n.local)
+    const label =
+      local?.name ||
+      (online.length === 1
+        ? online[0].name
+        : online.length > 1
+          ? `${online.length} 个节点`
+          : '')
+    if (label) this.hostname = label
+
+    this.setAgentOnline(online.length > 0)
+    this.setStatus(this.phase)
   }
 
   // ------------------------------------------------------------ 连接
@@ -244,33 +298,40 @@ export class RelayClient {
   private handleSignal(msg: Record<string, unknown>): void {
     switch (msg.type) {
       case 'HELLO':
-        this.setAgentOnline(Boolean(msg.agent_online))
+        if (msg.nodes) this.updateNodes(msg.nodes)
+        else this.setAgentOnline(Boolean(msg.agent_online))
         this.setStatus('online')
         this.backoff = 600
         this.resyncSessions()
         break
 
+      case 'NODES':
+        this.updateNodes(msg.nodes)
+        break
+
+      case 'NODE_ONLINE':
+        this.setAgentOnline(true)
+        this.resyncSessions()
+        break
+
+      case 'NODE_OFFLINE': {
+        const node = String(msg.node ?? '')
+        for (const session of this.sessions.values()) {
+          if (node && session.node !== node) continue
+          if (session.state === 'active') {
+            this.handlers.onState(session.leafId, 'disconnected', `节点 ${node || ''} 离线`)
+          }
+        }
+        break
+      }
+
+      // 兼容单节点老 relay
       case 'AGENT_ONLINE':
         this.setAgentOnline(true)
         this.resyncSessions()
         break
 
-      case 'SESSION_LIST': {
-        const host = String(msg.hostname ?? '')
-        if (host && host !== this.hostname) {
-          this.hostname = host
-          this.handlers.onStatus({
-            phase: this.phase,
-            agentOnline: this.agentOnline,
-            hostname: host
-          })
-        }
-        this.syncFromList(msg.sessions)
-        break
-      }
-
       case 'AGENT_OFFLINE':
-        this.setAgentOnline(false)
         for (const session of this.sessions.values()) {
           if (session.state === 'active') {
             this.handlers.onState(session.leafId, 'disconnected', '被控端离线')
@@ -278,10 +339,18 @@ export class RelayClient {
         }
         break
 
+      case 'SESSION_LIST': {
+        const node = String(msg.node ?? '')
+        this.syncFromList(msg.sessions, node)
+        break
+      }
+
       case 'SESSION_CREATED': {
         const sid = String(msg.session_id ?? '')
         const session = this.bySessionId.get(sid)
         if (!session) break
+        // 主进程自己也要记状态：节点掉线时要靠它判断「这个会话是不是真的断了」。
+        session.state = 'active'
         this.handlers.onState(session.leafId, 'active')
         break
       }
@@ -318,7 +387,8 @@ export class RelayClient {
           session_id: session.sessionId,
           data_token: session.dataToken,
           cols: session.cols,
-          rows: session.rows
+          rows: session.rows,
+          target: session.node || undefined
         })
       }
       this.openData(session)
@@ -340,7 +410,7 @@ export class RelayClient {
    * 这才是「同步」：两个窗口看的是同一个 PTY，谁敲键盘都进同一个 shell，
    * 画面一模一样。不是各开一个、各看各的。
    */
-  private syncFromList(raw: unknown): void {
+  private syncFromList(raw: unknown, node = ''): void {
     if (!Array.isArray(raw)) return
     const seen = new Set<string>()
     for (const item of raw) {
@@ -356,13 +426,16 @@ export class RelayClient {
         token,
         Number(entry.cols ?? 80) || 80,
         Number(entry.rows ?? 24) || 24,
-        Number(entry.index ?? 0) || 0
+        Number(entry.index ?? 0) || 0,
+        node
       )
     }
 
     // 镜像的会话在远端没了（另一端关掉了），这边如实下线，别留着死标签骗人。
+    // 多节点时必须只看本次上报的那个节点，否则 A 节点的列表会把 B 节点的会话全清掉。
     for (const session of [...this.sessions.values()]) {
       if (session.owned || seen.has(session.sessionId)) continue
+      if (node && session.node !== node) continue
       session.state = 'exited'
       this.handlers.onExit(session.leafId)
       this.closeData(session)
@@ -376,7 +449,8 @@ export class RelayClient {
     dataToken: string,
     cols: number,
     rows: number,
-    index: number
+    index: number,
+    node = ''
   ): void {
     // 镜像会话直接用 sessionId 当 leafId：它本来就在全局唯一，不需要再造一个。
     const leafId = sessionId
@@ -391,26 +465,44 @@ export class RelayClient {
       dataWs: null,
       dataTimer: null,
       pending: [],
-      owned: false
+      owned: false,
+      node
     }
     this.sessions.set(leafId, session)
     this.bySessionId.set(sessionId, session)
     if (this.pendingReady.delete(leafId)) this.markReady(leafId)
     this.indexLeaves.set(sessionId, index)
-    this.handlers.onAdopted(leafId, sessionId, cols, rows, false, index)
+    this.handlers.onAdopted(leafId, sessionId, cols, rows, false, index, node)
     this.openData(session)
   }
 
   // ------------------------------------------------------------ 会话
 
-  async create(leafId: string, cols: number, rows: number, shell?: string): Promise<{
+  async create(
+    leafId: string,
+    cols: number,
+    rows: number,
+    shell?: string,
+    target?: string
+  ): Promise<{
     ok: boolean
     sessionId?: string
     error?: string
   }> {
     if (this.phase !== 'online') return { ok: false, error: '尚未连接 relay' }
-    if (!this.agentOnline) return { ok: false, error: '被控端不在线' }
+    if (!this.agentOnline) return { ok: false, error: '没有可用的宿主节点' }
     if (this.sessions.size >= 20) return { ok: false, error: '已达 20 个会话上限' }
+
+    // 没指定目标：只有一台在线就它，多台则要求显式选择（避免开错机器）。
+    const online = this.nodes.filter((n) => n.online)
+    let nodeId = target ?? ''
+    if (!nodeId) {
+      if (online.length === 1) nodeId = online[0].node
+      else if (online.length === 0) return { ok: false, error: '没有可用的宿主节点' }
+      else return { ok: false, error: '有多台机器在线，请选择在哪台开终端' }
+    } else if (!online.some((n) => n.node === nodeId)) {
+      return { ok: false, error: `节点 ${nodeId} 不在线` }
+    }
 
     const sessionId = randomUUID()
     const dataToken = randomUUID()
@@ -425,7 +517,8 @@ export class RelayClient {
       dataWs: null,
       dataTimer: null,
       pending: [],
-      owned: true
+      owned: true,
+      node: nodeId
     }
     this.sessions.set(leafId, session)
     this.bySessionId.set(sessionId, session)
@@ -437,7 +530,8 @@ export class RelayClient {
       data_token: dataToken,
       cols,
       rows,
-      shell
+      shell,
+      target: nodeId
     })
     this.openData(session)
 
@@ -533,7 +627,8 @@ export class RelayClient {
         cols: session.cols,
         rows: session.rows,
         owned: session.owned,
-        index: this.indexLeaves.get(session.sessionId) ?? 0
+        index: this.indexLeaves.get(session.sessionId) ?? 0,
+        node: session.node
       }))
   }
 
