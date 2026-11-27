@@ -278,21 +278,28 @@ class Relay:
                 elif kind == "SESSION_LIST":
                     for item in msg.get("sessions") or []:
                         if isinstance(item, dict):
-                            # 编号以 relay 为准：老宿主进程会按自己的旧计数上报。
-                            authoritative = self.sid_index.get(str(item.get("session_id") or ""))
-                            if authoritative:
-                                item["index"] = authoritative
                             sid = str(item.get("session_id") or "")
                             token = str(item.get("data_token") or "")
                             if sid and token:
                                 self.sid_token[sid] = token
                                 self.sid_node[sid] = node_id
                                 self.token_node[token] = node_id
-                            # relay 重启后 seq 会归零，靠节点上报的最大编号接上，
-                            # 免得新会话和老会话撞号。
-                            idx = item.get("index")
-                            if isinstance(idx, int) and idx > self.seq:
-                                self.seq = idx
+                            # 编号只认 relay 这一份。每个会话第一次出现时定号，之后不再变；
+                            # 宿主自报的编号只在 relay 从没见过它时作为初值（relay 重启后的老会话），
+                            # 没有再补一个，免得客户端拿到 0 只能自己数，两端数出不同的号。
+                            if sid:
+                                known = self.sid_index.get(sid)
+                                if known is None:
+                                    idx = item.get("index")
+                                    if isinstance(idx, int) and idx > 0:
+                                        known = idx
+                                        if idx > self.seq:
+                                            self.seq = idx
+                                    else:
+                                        known = self.next_index()
+                                    self.sid_index[sid] = known
+                                LOG.debug("列表定号 sid=%s index=%s", sid[:8], known)
+                                item["index"] = known
                     node.last_list = {
                         **msg,
                         "node": node_id,
@@ -378,11 +385,20 @@ class Relay:
                         if token:
                             self.channels.setdefault(token, Channel()).owner = ws
                         # 编号由 relay 全局分配：多节点各自从 1 数必然撞号。
-                        msg["index"] = self.next_index()
+                        # 但只在第一次见到这个会话时发号 —— 客户端重连会把自己建的会话
+                        # 补发一遍 SESSION_CREATE，重新发号会让同一个终端在两台机器上
+                        # 显示成两个不同的编号。
                         sid = str(msg.get("session_id") or "")
+                        known = self.sid_index.get(sid) if sid else None
+                        if known is not None:
+                            msg["index"] = known
+                        else:
+                            msg["index"] = self.next_index()
+                            if sid:
+                                self.sid_index[sid] = msg["index"]
                         if sid:
+                            LOG.debug("发号 sid=%s index=%s known=%s src=%s", sid[:8], msg["index"], known, msg_type)
                             self.sid_node[sid] = node.node_id
-                            self.sid_index[sid] = msg["index"]
                         if token:
                             self.channels.setdefault(token, Channel()).node = node.node_id
                         self.stats["sessions_opened"] += 1
