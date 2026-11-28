@@ -34,7 +34,6 @@ export const IpcChannel = {
   SessionWrite: 'session:write',
   SessionResize: 'session:resize',
   SessionClose: 'session:close',
-  SessionList: 'session:list',
   /** 渲染 -> 主：拉当前所有会话（窗口加载晚于 relay 连接时，adopt 事件已经过去了） */
   SessionSnapshot: 'session:snapshot',
   /** 渲染 -> 主：这个面板的 xterm 已经挂好了，可以开始灌字节 */
@@ -266,7 +265,6 @@ export interface RptyBridge {
   write(leafId: string, data: string): void
   resize(leafId: string, cols: number, rows: number): void
   close(leafId: string): Promise<void>
-  list(): Promise<string[]>
   snapshotSessions(): Promise<SessionAdoptedPayload[]>
   ready(leafId: string): void
   unready(leafId: string): void

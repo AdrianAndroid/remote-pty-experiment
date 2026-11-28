@@ -355,7 +355,6 @@ function registerIpc(): void {
     relay.close(leafId)
   })
 
-  ipcMain.handle(IpcChannel.SessionList, () => relay.list())
   ipcMain.handle(IpcChannel.SessionSnapshot, () => relay.snapshot())
 
   ipcMain.on(IpcChannel.SessionReady, (_event, leafId: string) => relay.markReady(leafId))

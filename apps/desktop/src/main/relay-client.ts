@@ -1216,10 +1216,6 @@ export class RelayClient {
     this.pendingReady.delete(leafId)
   }
 
-  list(): string[] {
-    return [...this.sessions.keys()]
-  }
-
   /** 渲染层面板就绪：把攒下的字节按到达顺序吐出去，之后转为实时推送。 */
   markReady(leafId: string): void {
     if (!this.sessions.has(leafId)) {

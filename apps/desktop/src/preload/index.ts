@@ -43,7 +43,6 @@ const bridge: RptyBridge = {
   resize: (leafId: string, cols: number, rows: number) =>
     ipcRenderer.send(IpcChannel.SessionResize, { leafId, cols, rows }),
   close: (leafId: string) => ipcRenderer.invoke(IpcChannel.SessionClose, leafId),
-  list: () => ipcRenderer.invoke(IpcChannel.SessionList),
   snapshotSessions: () => ipcRenderer.invoke(IpcChannel.SessionSnapshot),
   ready: (leafId: string) => ipcRenderer.send(IpcChannel.SessionReady, leafId),
   unready: (leafId: string) => ipcRenderer.send(IpcChannel.SessionUnready, leafId),
