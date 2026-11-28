@@ -1,1 +1,3 @@
-websockets==12.0
+# agent 侧要求 websockets>=14（websockets.connect(proxy=...) 是 14/15 才有的参数），
+# relay 侧对 12.x / 15.x 都做了兼容（见 relay.py 顶部）。这里钉一个两边都能跑的版本。
+websockets==15.0.1

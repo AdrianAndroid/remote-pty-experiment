@@ -379,3 +379,49 @@ macOS 上不再沿用「关窗不退」的惯例——那会让在线列表里�
 #### Scenario: 终端不受影响
 - **WHEN** 关掉客户端后重新打开
 - **THEN** 本地 agent 里的终端一直在跑，重新认领宿主后会话被镜像回来
+
+### Requirement: 服务端状态单一事实来源
+
+relay SHALL 用「一个对象一份记录」的形式维护在线状态：客户端、宿主节点、会话各是一张表，
+一行一个单位，行内带着它与别人/别人的关系（`client.pair`、`client.host`、`session.node`、
+`session.owner`）。判定任一状态时 SHALL 只读这一处，不得要求多本并行字典互相对齐。
+
+#### Scenario: 一个客户端只有一份记录
+- **WHEN** 同一个 client id 开了两个窗口
+- **THEN** 它在在线表里仍是一行，两条连接合并在该行的连接集合里；关掉其中一个窗口，这一行还在
+
+#### Scenario: 关窗即下线只需删对象
+- **WHEN** 一个客户端最后一条 `/ctl` 断开
+- **THEN** 该行从在线表移除，配对关系随之解除，其余客户端不受影响；不存在需要"顺手清理"的第二处状态
+
+#### Scenario: 归属只有一个字段
+- **WHEN** 查询某会话属于谁
+- **THEN** 结果由 `session.owner` 一处决定（落盘也只落这一份），不依赖另存的主人与事后认领补丁
+
+#### Scenario: 重启后状态可复原
+- **WHEN** relay 进程重启
+- **THEN** 从状态文件恢复每行的 `owner` / `index` / `claimed` 与全局发号水位，恢复后新会话编号不与旧会话冲突
+
+#### Scenario: 状态收口不改对外行为
+- **WHEN** 服务端完成状态收口重构
+- **THEN** 三条端点、全部信令类型与字段、`/healthz` 字段、数据面多播与快照顺序均保持不变，由集成测钉住
+
+### Requirement: 依赖声明与运行时一致
+
+仓库声明的依赖版本 SHALL 足以运行仓库里的代码：按其安装出来的环境，relay 与 agent 都必须能启动、
+`/healthz` 必须可用。同一份依赖文件不得让两端落在互不兼容的版本区间上。
+
+relay SHALL 在 `websockets` 12.x 与 15.x 上都可运行（两套实现的 serve 入口与 `process_request`
+签名不同），版本差异只允许出现在一处适配层，不得散落到业务分支。
+
+#### Scenario: 按 requirements 装出来的镜像能跑
+- **WHEN** 用 `server/requirements.txt` 装依赖并启动 relay
+- **THEN** 进程成功监听，`/healthz` 返回 200 与 JSON，不出现 `AttributeError` / `TypeError`
+
+#### Scenario: 12.x 与 15.x 都认
+- **WHEN** relay 分别运行在 `websockets==12.0` 与 `websockets==15.0.1` 下
+- **THEN** 鉴权、`/healthz`、信令转发、数据面多播行为一致，测试两边都通过
+
+#### Scenario: 新老版本混搭不掉线
+- **WHEN** relay 是 12.x 而 agent 是 15.x（滚动升级的中间态）
+- **THEN** agent 能连上、能开终端、按键能回显，升级窗口期不产生故障
