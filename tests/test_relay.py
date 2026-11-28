@@ -864,6 +864,26 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("t1", self.relay.channels)
         self.assertEqual(viewer.closed[0], 4008)
 
+    async def test_slow_viewer_is_dropped_not_buffered_forever(self) -> None:
+        """等快照期间一直不回的 viewer：攒到字节上限就断开，别替它吃内存。
+
+        relay 那台机器只有 1.6GiB、无 swap。队列只按条数限流时，一条 8MB 的帧
+        重复 512 次就是 4GB —— 一个卡死的客户端足以把整台服务拖死。
+        """
+        await self.agent("n1")
+        ctl = await self.client("c1", host="n1")
+        await self.create(ctl, sid="s1", token="t1")
+        agent_data = await self.open_agent_data("t1")
+        viewer = await self.open_viewer("t1")
+        self.assertFalse(self.relay.viewers[next(iter(self.relay.viewers))].ready)
+
+        big = b"z" * (1024 * 1024)
+        for _ in range(9):  # 9MB > VIEWER_QUEUE_BYTES
+            await self.feed(agent_data, big)
+
+        self.assertEqual(viewer.closed[0], 4009, "积压超限的 viewer 要被断开")
+        self.assertEqual(self.relay.viewers, {}, "断开后不该再留着它的队列")
+
     async def test_borrowed_channel_survives_room_close(self) -> None:
         """借来的终端散场：只踢 viewer，通道和 node 必须留着。
 

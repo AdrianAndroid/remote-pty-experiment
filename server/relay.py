@@ -95,6 +95,9 @@ LOG = logging.getLogger("relay")
 MAX_MESSAGE = 8 * 1024 * 1024
 # viewer 还没拿到快照时最多替它排队多少条增量，超了就丢（宁可少画一段也不能撑爆内存）。
 VIEWER_QUEUE_MAX = 512
+# 单个 viewer 在等快照期间最多替它攒多少字节。超了就断开它 ——
+# 重连会走 SESSION_SNAPSHOT 重新取屏，比让整台 relay 被一个卡死的客户端拖死划算。
+VIEWER_QUEUE_BYTES = 8 * 1024 * 1024
 # 房间一方断线后的宽限期：断网重连能续上，超过就关房并销毁终端。
 # 不做宽限的话，Wi-Fi 抖一下就把 vim 里没保存的东西一起带走。
 ROOM_GRACE_SECONDS = 30.0
@@ -186,6 +189,9 @@ class Viewer:
     # 还没拿到快照前，增量先排队，保证「历史在前、增量在后」的顺序。
     ready: bool = False
     queue: List[bytes] = field(default_factory=list)
+    # 队列已攒的字节数。只按条数限流是不够的：一条 8MB 的帧重复 512 次，
+    # 就是 4GB —— 这台 relay 所在机器只有 1.6GiB 且没有 swap，会直接被 OOM 杀掉。
+    queue_bytes: int = 0
 
 
 @dataclass
@@ -868,6 +874,14 @@ class Relay:
 
         rows = payload.get("sessions") if isinstance(payload.get("sessions"), list) else None
         sid = str(payload.get("session_id") or "")
+
+        if rows is None and not sid:
+            # 没有会话内容要按人裁剪（CLIENTS / NODES / NODE_ONLINE 这类）：
+            # 序列化一次复用，别为每个客户端各 dump 一遍 —— 20 个客户端就是 20 次。
+            text = json.dumps(payload, ensure_ascii=False)
+            for ws in list(self.by_ws):
+                await self._send_text(ws, text)
+            return
 
         for ws, client in list(self.by_ws.items()):
             if rows is not None:
@@ -1568,9 +1582,22 @@ class Relay:
                     for viewer in list(live.viewers.values()):
                         if viewer.ready:
                             await self._send_bytes(viewer.ws, chunk)
-                        elif len(viewer.queue) < VIEWER_QUEUE_MAX:
+                        elif (
+                            len(viewer.queue) < VIEWER_QUEUE_MAX
+                            and viewer.queue_bytes + len(chunk) <= VIEWER_QUEUE_BYTES
+                        ):
                             # 还没拿到快照，先攒着，别和历史串序。
                             viewer.queue.append(chunk)
+                            viewer.queue_bytes += len(chunk)
+                        else:
+                            # 一直不收的人不该占用这台机器的内存：断开，让它重连走快照。
+                            LOG.info(
+                                "viewer %s 积压 %d 字节，断开（通道 %s）",
+                                viewer.cid,
+                                viewer.queue_bytes,
+                                token[:8],
+                            )
+                            await self._drop_viewer(live, viewer, 4009, "slow")
             except ConnectionClosed:
                 pass
             finally:
@@ -1625,6 +1652,17 @@ class Relay:
             LOG.info("数据通道 %s viewer %s 离开（剩 %d）", token[:8], cid, len(channel.viewers))
             self._drop_channel_if_idle(token)
 
+    async def _drop_viewer(
+        self, channel: "Channel", viewer: "Viewer", code: int, reason: str
+    ) -> None:
+        """踢掉单个观看者：通道和别的观看者不受影响。"""
+        channel.viewers.pop(viewer.cid, None)
+        self.viewers.pop(viewer.cid, None)
+        try:
+            await viewer.ws.close(code=code, reason=reason)
+        except Exception:  # noqa: BLE001 - 对端可能已经断了
+            pass
+
     async def _detach_viewers(self, token: str, reason: str) -> None:
         """只关观看者，保留通道本身（agent 连接 + node 归属）。
 
@@ -1658,6 +1696,15 @@ class Relay:
             except Exception:  # noqa: BLE001 - 对端可能已经断了
                 pass
         channel.viewers.clear()
+
+    async def _send_text(self, ws: Any, text: str) -> None:
+        """已经是 JSON 字符串了，直接发，不再序列化。"""
+        try:
+            await ws.send(text)
+        except ConnectionClosed:
+            pass
+        except Exception:  # noqa: BLE001
+            LOG.debug("send_text 失败", exc_info=True)
 
     async def _send_bytes(self, ws: Any, chunk: bytes) -> None:
         try:
@@ -1694,6 +1741,7 @@ class Relay:
         viewer.ready = True
         queued = viewer.queue
         viewer.queue = []
+        viewer.queue_bytes = 0
         for chunk in queued:
             await self._send_bytes(viewer.ws, chunk)
         LOG.debug("快照已投递 cid=%s（补 %d 条增量）", cid, len(queued))

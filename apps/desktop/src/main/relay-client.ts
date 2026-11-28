@@ -180,6 +180,17 @@ export class RelayClient {
    */
   private readyLeaves = new Set<string>()
   private buffered = new Map<string, Buffer[]>()
+  /** 各 leaf 攒住的字节数：避免每来一块就 reduce 一遍整条队列（O(n²)）。 */
+  private bufferedBytes = new Map<string, number>()
+  /**
+   * 准备推给渲染层的字节。
+   *
+   * 终端输出是碎片的：一次 `ls` 几十块，`yes` 一秒上千块。逐块走 IPC + 逐块
+   * xterm.write 会把两边的 CPU 都吃满，而画面完全看不出区别。这里按 leaf 合并，
+   * 一个事件循环内最多推一次，攒到 64KB 就立刻推。
+   */
+  private outPending = new Map<string, { chunks: Buffer[]; bytes: number }>()
+  private outScheduled = false
   /** 面板比会话先就绪时（新建终端就是这种顺序），先把 leafId 记着。 */
   private pendingReady = new Set<string>()
   /** sessionId -> 被控机上的序号 */
@@ -483,6 +494,8 @@ export class RelayClient {
     this.bySessionId.clear()
     this.readyLeaves.clear()
     this.buffered.clear()
+    this.bufferedBytes.clear()
+    this.outPending.clear()
     this.pendingReady.clear()
     this.indexLeaves.clear()
     this.detached.clear()
@@ -1228,8 +1241,36 @@ export class RelayClient {
     const queue = this.buffered.get(leafId)
     if (!queue) return
     this.buffered.delete(leafId)
+    this.bufferedBytes.delete(leafId)
     for (const chunk of queue) {
-      this.handlers.onData(leafId, new Uint8Array(chunk))
+      this.queueOut(leafId, chunk)
+    }
+  }
+
+  /** 合并同一块终端在一个事件循环内的输出，再一次性交给渲染层。 */
+  private queueOut(leafId: string, buf: Buffer): void {
+    const slot = this.outPending.get(leafId) ?? { chunks: [], bytes: 0 }
+    slot.chunks.push(buf)
+    slot.bytes += buf.length
+    this.outPending.set(leafId, slot)
+    if (slot.bytes >= 64 * 1024) {
+      this.flushOut()
+      return
+    }
+    if (this.outScheduled) return
+    this.outScheduled = true
+    setImmediate(() => this.flushOut())
+  }
+
+  private flushOut(): void {
+    this.outScheduled = false
+    if (this.outPending.size === 0) return
+    const entries = [...this.outPending.entries()]
+    this.outPending.clear()
+    for (const [leafId, slot] of entries) {
+      const data =
+        slot.chunks.length === 1 ? slot.chunks[0] : Buffer.concat(slot.chunks, slot.bytes)
+      this.handlers.onData(leafId, new Uint8Array(data.buffer, data.byteOffset, data.length))
     }
   }
 
@@ -1243,7 +1284,11 @@ export class RelayClient {
   markUnready(leafId: string): void {
     this.readyLeaves.delete(leafId)
     this.pendingReady.delete(leafId)
-    if (this.sessions.has(leafId)) this.buffered.set(leafId, [])
+    this.outPending.delete(leafId)
+    if (this.sessions.has(leafId)) {
+      this.buffered.set(leafId, [])
+      this.bufferedBytes.set(leafId, 0)
+    }
   }
 
   /** 当前所有会话的完整信息，供后加载的渲染层一次性补齐标签。 */
@@ -1304,15 +1349,17 @@ export class RelayClient {
       if (!this.readyLeaves.has(session.leafId)) {
         const queue = this.buffered.get(session.leafId) ?? []
         // 上限 1MB，超了从头丢：宁可少一段历史也不能把内存吃干。
+        // 字节数用累加记，别每块都 reduce 一遍整条队列。
         queue.push(buf)
-        let total = queue.reduce((sum, item) => sum + item.length, 0)
+        let total = (this.bufferedBytes.get(session.leafId) ?? 0) + buf.length
         while (total > 1024 * 1024 && queue.length > 1) {
           total -= queue.shift()!.length
         }
         this.buffered.set(session.leafId, queue)
+        this.bufferedBytes.set(session.leafId, total)
         return
       }
-      this.handlers.onData(session.leafId, new Uint8Array(buf))
+      this.queueOut(session.leafId, buf)
     })
 
     ws.on('close', () => {
