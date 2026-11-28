@@ -8,7 +8,7 @@
 import { spawn } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { BrowserWindow, Menu, app, dialog, ipcMain, shell } from 'electron'
+import { BrowserWindow, Menu, app, ipcMain, shell } from 'electron'
 import type { MenuCommand, RelayConfig } from '../shared/ipc'
 import { IpcChannel } from '../shared/ipc'
 import { RelayClient } from './relay-client'
@@ -150,14 +150,11 @@ function createClient(): void {
   })
   child.unref()
 
-  void dialog.showMessageBox({
-    type: 'info',
-    message: `已新建客户端「${name}」`,
-    detail:
-      `它会出现在设备列表里，名字带 ${name} 后缀；终端和标签跟当前这个客户端互不影响。\n\n` +
-      `数据目录：${dir}`,
-    buttons: ['好']
-  })
+  // 用应用内 Toast 说一声，不弹模态框：建客户端是顺手动作，不该打断人正在干的事。
+  send(
+    IpcChannel.AppNotice,
+    `已新建客户端「${name}」：它会出现在设备列表里，终端和标签跟当前这个互不影响（数据目录 ${dir}）`
+  )
 }
 
 function buildMenu(): void {
@@ -170,7 +167,7 @@ function buildMenu(): void {
         {
           label: '重新连接 relay',
           accelerator: 'CmdOrCtrl+R',
-          click: () => sendMenu('new-tab')
+          click: () => sendMenu('reconnect')
         },
         { type: 'separator' },
         // 不起眼，但找得到：这是「再开一个客户端」的唯一入口。

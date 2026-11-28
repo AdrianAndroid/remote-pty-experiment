@@ -63,7 +63,9 @@ export const IpcChannel = {
   RelayInvited: 'relay:invited',
   RelayError: 'relay:error',
   /** 主 -> 渲染：菜单命令 */
-  MenuCommand: 'menu:command'
+  MenuCommand: 'menu:command',
+  /** 主 -> 渲染：一句提示（应用内 Toast，不弹模态框） */
+  AppNotice: 'app:notice'
 } as const
 
 export type MenuCommand =
@@ -76,6 +78,7 @@ export type MenuCommand =
   | 'toggle-readonly'
   | 'devices'
   | 'disconnect'
+  | 'reconnect'
 
 export interface ConfigInfo {
   url: string
@@ -272,5 +275,7 @@ export interface RptyBridge {
   /** 收到通话邀请：弹窗由用户决定 */
   onInvited(handler: (invite: InviteView) => void): () => void
   onError(handler: (payload: RelayErrorPayload) => void): () => void
+  /** 主进程的一句提示：渲染层用 Toast 显示，不打断操作 */
+  onNotice(handler: (text: string) => void): () => void
   onMenu(handler: (command: MenuCommand, arg?: number) => void): () => void
 }

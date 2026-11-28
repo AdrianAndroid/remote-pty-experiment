@@ -92,6 +92,8 @@ export default function App(): React.JSX.Element {
   const [collapsed, setCollapsed] = useState(false)
   const [config, setConfig] = useState<ConfigInfo>({ url: '', hasToken: false })
   const [busy, setBusy] = useState(false)
+  // 主进程的提示（例如「已新建客户端」）：应用内 Toast，几秒后自己消失。
+  const [notice, setNotice] = useState('')
   const [readOnly, setReadOnly] = useState(false)
   const [error, setError] = useState('')
   /** 手动断开过：连接页要显示「已断开 + 重新连接」，而不是首次配置的样子 */
@@ -593,6 +595,18 @@ export default function App(): React.JSX.Element {
   requestCreateRef.current = createSession
 
   useEffect(() => {
+    const offNotice = window.rpty.onNotice((text: string) => setNotice(text))
+    return offNotice
+  }, [])
+
+  // Toast 自己退场：8 秒，够读完但不占地方；点一下也能关。
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(''), 8000)
+    return () => clearTimeout(timer)
+  }, [notice])
+
+  useEffect(() => {
     const offMenu = window.rpty.onMenu((command: MenuCommand, arg?: number) => {
       switch (command) {
         case 'new-tab':
@@ -623,6 +637,10 @@ export default function App(): React.JSX.Element {
           // 在工作区里按 ⌘⇧D = 回列表；停在列表上才是断中继。
           if (workspaceOpen) void closeOrLeaveRef.current()
           else void handleDisconnect()
+          break
+        case 'reconnect':
+          // 菜单「重新连接 relay ⌘R」：以前这里错发成 new-tab，按 ⌘R 会开一个终端。
+          void handleReconnect()
           break
         default:
           break
@@ -687,6 +705,7 @@ export default function App(): React.JSX.Element {
           onAccept={() => void acceptInvite()}
           onDecline={() => void declineInvite()}
         />
+        <Toast text={notice} onClose={() => setNotice('')} />
       </>
     )
   }
@@ -777,6 +796,8 @@ export default function App(): React.JSX.Element {
             {error}
           </div>
         )}
+
+        <Toast text={notice} onClose={() => setNotice('')} />
       </main>
 
       <InviteDialog
@@ -784,6 +805,16 @@ export default function App(): React.JSX.Element {
         onAccept={() => void acceptInvite()}
         onDecline={() => void declineInvite()}
       />
+    </div>
+  )
+}
+
+/** 应用内提示条：主进程说一句就走，不弹模态框、不打断手上的操作。 */
+function Toast({ text, onClose }: { text: string; onClose: () => void }): React.JSX.Element | null {
+  if (!text) return null
+  return (
+    <div className="toast toast--info" onClick={onClose} role="presentation">
+      {text}
     </div>
   )
 }

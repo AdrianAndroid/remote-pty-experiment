@@ -62,6 +62,8 @@ const bridge: RptyBridge = {
   onInvited: subscribe(IpcChannel.RelayInvited),
   onStatus: subscribe<RelayStatus>(IpcChannel.RelayStatusChanged),
   onError: subscribe(IpcChannel.RelayError),
+  // 主进程说一句就走（比如"已新建客户端"），渲染层拿 Toast 显示，不弹模态框。
+  onNotice: subscribe<string>(IpcChannel.AppNotice),
   onMenu: (handler: (command: MenuCommand, arg?: number) => void) => {
     const listener = (
       _event: Electron.IpcRendererEvent,
