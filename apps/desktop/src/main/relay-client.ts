@@ -1237,6 +1237,19 @@ export class RelayClient {
     }
   }
 
+  /**
+   * 画面卸掉了（回列表、切走标签、房间散了）。
+   *
+   * 关键：一定要把「已就绪」撤掉。leafId 就是 sessionId，重新进房时还是同一个
+   * leafId，如果这里还记着就绪，新画面挂上之前到达的快照会被当成实时数据直接
+   * 推给渲染层 —— 那时还没有 xterm 接，字节就进了黑洞，用户看到的是一块黑屏。
+   */
+  markUnready(leafId: string): void {
+    this.readyLeaves.delete(leafId)
+    this.pendingReady.delete(leafId)
+    if (this.sessions.has(leafId)) this.buffered.set(leafId, [])
+  }
+
   /** 当前所有会话的完整信息，供后加载的渲染层一次性补齐标签。 */
   snapshot(): Array<{
     leafId: string

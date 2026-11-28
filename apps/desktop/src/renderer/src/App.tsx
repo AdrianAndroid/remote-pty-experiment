@@ -231,12 +231,13 @@ export default function App(): React.JSX.Element {
     const offStatus = window.rpty.onStatus((next) => {
       setStatus(next)
       if (next.phase === 'online') setBusy(false)
-      // 房间开了 = 密码对了：密码框可以收了。
+      // 房间开了 = 密码对了：密码框可以收了，上一间房留下的提示也该走了。
       if (next.room) {
         if (joinTimerRef.current) clearTimeout(joinTimerRef.current)
         setJoinTarget(null)
         setJoinError('')
         setJoinBusy(false)
+        setError('')
       }
     })
 

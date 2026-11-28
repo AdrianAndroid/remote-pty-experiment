@@ -39,6 +39,8 @@ export const IpcChannel = {
   SessionSnapshot: 'session:snapshot',
   /** 渲染 -> 主：这个面板的 xterm 已经挂好了，可以开始灌字节 */
   SessionReady: 'session:ready',
+  /** 画面卸掉了：之后的数据先攒着，别推给一个不存在的 xterm */
+  SessionUnready: 'session:unready',
 
   /** 只读模式：渲染 -> 主 查询/切换，主 -> 渲染 广播 */
   ReadOnlyGet: 'readonly:get',
@@ -267,6 +269,7 @@ export interface RptyBridge {
   list(): Promise<string[]>
   snapshotSessions(): Promise<SessionAdoptedPayload[]>
   ready(leafId: string): void
+  unready(leafId: string): void
 
   /** 只读：连上了、画面在刷，但键盘/粘贴/尺寸都不发给被控端 */
   getReadOnly(): Promise<boolean>

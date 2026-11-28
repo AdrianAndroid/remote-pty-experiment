@@ -864,6 +864,37 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("t1", self.relay.channels)
         self.assertEqual(viewer.closed[0], 4008)
 
+    async def test_borrowed_channel_survives_room_close(self) -> None:
+        """借来的终端散场：只踢 viewer，通道和 node 必须留着。
+
+        真机踩到的 bug：上一版这里连通道一起 pop，agent 侧连接却还活着 →
+        下次进房的新 viewer 挂在一个不知道 node 的新通道上，relay 不会向
+        agent 要快照，shell 又空闲没有增量 —— 用户看到的是一块永远空白的终端。
+        """
+        agent = await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.create(a, sid="s1", token="t1")  # 建房之前就有的私有终端 → 被借用
+        await self.open_room(a, "c1", b, "c2")
+        await self.open_agent_data("t1")
+        viewer = await self.open_viewer("t1", "c1")
+        await self.answer_snapshots(agent, b"$ ")
+
+        await self.feed(a, {"type": "ROOM_LEAVE"})
+        self.assertEqual(viewer.closed[0], 4008, "房间里的 viewer 要被请出去")
+        self.assertIn("t1", self.relay.channels, "借来的通道不能跟着房间一起摘")
+        self.assertEqual(self.relay.channels["t1"].node, "n1", "通道的 node 归属要留住")
+        self.assertIn("s1", self.relay.sessions, "借来的 PTY 不该被杀")
+
+        # 再开一间房、还是借用同一台终端：新 viewer 必须重新拿到快照，而不是干等增量
+        before = len(agent.of_type("VIEWER_JOINED"))
+        await self.open_room(a, "c1", b, "c2")
+        v2 = await self.open_viewer("t1", "c2")
+        self.assertEqual(len(agent.of_type("VIEWER_JOINED")), before + 1)
+        await self.answer_snapshots(agent, b"PROMPT")
+        self.assertIn(b"PROMPT", v2.binary(), "新进房的人要看到当前屏幕，不能黑着")
+        self.assertIsNone(v2.closed, "合法观看者不该被拒")
+
     async def test_data_plane_rejects_viewer_without_identity(self) -> None:
         """拿着 data_token 直连、不说自己是谁 —— 拒。"""
         await self.agent("n1")

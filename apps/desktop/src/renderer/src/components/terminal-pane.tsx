@@ -170,6 +170,8 @@ export function TerminalPane({
 
     return () => {
       offData()
+      // 先告诉主进程「这块画面没了」，它才会把后续字节攒起来等下一块画面。
+      window.rpty.unready(leafId)
       observer.disconnect()
       window.removeEventListener('resize', schedule)
       if (pending) cancelAnimationFrame(pending)

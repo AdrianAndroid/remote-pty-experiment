@@ -359,6 +359,7 @@ function registerIpc(): void {
   ipcMain.handle(IpcChannel.SessionSnapshot, () => relay.snapshot())
 
   ipcMain.on(IpcChannel.SessionReady, (_event, leafId: string) => relay.markReady(leafId))
+  ipcMain.on(IpcChannel.SessionUnready, (_event, leafId: string) => relay.markUnready(leafId))
 
   ipcMain.handle(IpcChannel.ReadOnlyGet, () => relay.isReadOnly())
 

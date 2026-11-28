@@ -46,6 +46,7 @@ const bridge: RptyBridge = {
   list: () => ipcRenderer.invoke(IpcChannel.SessionList),
   snapshotSessions: () => ipcRenderer.invoke(IpcChannel.SessionSnapshot),
   ready: (leafId: string) => ipcRenderer.send(IpcChannel.SessionReady, leafId),
+  unready: (leafId: string) => ipcRenderer.send(IpcChannel.SessionUnready, leafId),
 
   getReadOnly: (): Promise<boolean> => ipcRenderer.invoke(IpcChannel.ReadOnlyGet),
   setReadOnly: (readOnly: boolean): Promise<boolean> =>

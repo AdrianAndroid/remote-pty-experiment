@@ -687,7 +687,12 @@ class Relay:
                 if borrowed is not None:
                     borrowed.room = ""
                     if borrowed.token:
-                        await self._close_data_channel(borrowed.token, "room_closed")
+                        # 借来的终端不随房间销毁：PTY 还活着，数据通道也必须留着。
+                        # 连通道一起 pop 的话，下次进房的新 viewer 会挂在一个不知道
+                        # node 的新通道上，relay 也就不会向 agent 要快照 ——
+                        # 用户看到的会是一块永远空白的终端（shell 空闲时连增量都没有）。
+                        # 这里只把房间里的 viewer 请出去，agent 连接与 channel.node 保留。
+                        await self._detach_viewers(borrowed.token, "room_closed")
                 continue
 
             session = self.sessions.pop(sid, None)
@@ -1557,7 +1562,10 @@ class Relay:
                     if isinstance(chunk, str):
                         chunk = chunk.encode("utf-8")
                     self.stats["bytes_from_agent"] += len(chunk)
-                    for viewer in list(channel.viewers.values()):
+                    # 通道可能被重建过（房间关了又开）：每条都按 token 现取，
+                    # 否则字节会写进一个已经没人管的旧对象，所有人都收不到。
+                    live = self.channels.get(token) or channel
+                    for viewer in list(live.viewers.values()):
                         if viewer.ready:
                             await self._send_bytes(viewer.ws, chunk)
                         elif len(viewer.queue) < VIEWER_QUEUE_MAX:
@@ -1579,6 +1587,10 @@ class Relay:
         self.viewers[cid] = viewer
         LOG.info("数据通道 %s viewer %s 加入（共 %d）", token[:8], cid, len(channel.viewers))
 
+        # 通道上没记 node（历史状态、或 viewer 比 agent 先到）时，用会话自己记的 node 兜底，
+        # 不然后面就发不出 VIEWER_JOINED，新 viewer 永远等不到快照。
+        if not channel.node and session is not None and session.node:
+            channel.node = session.node
         owner_node = self.nodes.get(channel.node or "")
         if owner_node is not None and owner_node.ws is not None:
             # 请 agent 回一份环形缓冲，只补这个新来的。
@@ -1612,6 +1624,23 @@ class Relay:
             self.viewers.pop(cid, None)
             LOG.info("数据通道 %s viewer %s 离开（剩 %d）", token[:8], cid, len(channel.viewers))
             self._drop_channel_if_idle(token)
+
+    async def _detach_viewers(self, token: str, reason: str) -> None:
+        """只关观看者，保留通道本身（agent 连接 + node 归属）。
+
+        用于「借来的终端」散场：PTY 还在、通道还得能被人重新挂上来。
+        """
+        channel = self.channels.get(token)
+        if channel is None:
+            return
+        for viewer in list(channel.viewers.values()):
+            self.viewers.pop(viewer.cid, None)
+            try:
+                await viewer.ws.close(code=4008, reason=reason)
+            except Exception:  # noqa: BLE001 - 对端可能已经断了
+                pass
+        channel.viewers.clear()
+        self._drop_channel_if_idle(token)
 
     async def _close_data_channel(self, token: str, reason: str) -> None:
         """关掉一条数据通道上的所有 viewer 并摘掉通道。
