@@ -303,10 +303,21 @@ app.whenReady().then(() => {
   })
 })
 
+// 窗口全关 = 这个客户端下线。macOS 的「关窗不退」会让 relay 一直认为它还在线，
+// 于是在线列表里留一条点不开也进不去的僵尸卡片。终端不受影响：PTY 在本地 agent 里。
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  app.quit()
 })
 
-app.on('before-quit', () => {
-  void relay.disconnect()
+// 退出前先跟 relay 有序告别：CTL_LEAVE 让配对的另一端也知道，再关 ctl，
+// 避免进程被直接收掉、relay 只能等 TCP 超时。
+let quitting = false
+app.on('before-quit', (event) => {
+  if (quitting) return
+  quitting = true
+  event.preventDefault()
+  void relay.disconnect().finally(() => {
+    // disconnect() 里已经等过 80ms；这里再留一点余量给 relay 广播下线。
+    setTimeout(() => app.exit(0), 120)
+  })
 })
