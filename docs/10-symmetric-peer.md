@@ -1,7 +1,10 @@
 # 10 · 对称 Peer 设计（双向）
 
-> 状态：**提案**，取代 `docs/02-architecture.md` §2 角色定义与 `docs/03-protocol.md` 中的固定角色模型。
-> 与 `docs/08-bold-design.md`（加密 + mux + broker）叠加生效，不冲突。
+> 状态：**历史提案，未实施**。2026-11-28 起，本文描述的对称 peer / bridge 模型已被
+> `docs/12-concept-model.md` 的「客户端 + 宿主 + 房间」模型取代。
+>
+> 其中「两端互相开 shell 同看」这件事**已取消**：一对一只保留在两个客户端之间的
+> 私密房间里（`pair-as-private-room`），不做通用的对称通道。本文只作设计史保留。
 
 ---
 

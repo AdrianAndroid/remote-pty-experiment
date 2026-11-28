@@ -157,8 +157,9 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         return ws
 
-    async def open_viewer(self, token: str = "t1") -> FakeWS:
-        ws = self.spawn(f"/d/{token}?role=ctl&token={TOKEN}")
+    async def open_viewer(self, token: str = "t1", client_id: str = "c1") -> FakeWS:
+        """数据面必须带 client 身份：relay 会按会话可见域校验。"""
+        ws = self.spawn(f"/d/{token}?role=ctl&client={client_id}&token={TOKEN}")
         await self.settle()
         return ws
 
@@ -247,6 +248,38 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.owner, "", "房间里的终端不该同时挂在某张桌面下")
         self.assertIn("s9", self.relay.rooms[session.room].sessions)
 
+    async def test_room_open_pushes_lists_to_both_members(self) -> None:
+        """开房就把房间里的终端推给两个人。
+
+        不推的话，宽限期内别人在房间里开的终端，回来的那一端要等到下次变更才看见 ——
+        用户看到的是一个空房间，而对面明明有终端在跑。
+        """
+        agent = await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.open_room(a, "c1", b, "c2")
+        await self.create(a, sid="s1", token="t1")
+
+        # 宿主把这块 PTY 报进列表（真实链路里 agent 建完就上报）
+        await self.feed(
+            agent,
+            {
+                "type": "SESSION_LIST",
+                "sessions": [
+                    {"session_id": "s1", "data_token": "t1", "cols": 80, "rows": 24, "index": 1}
+                ],
+            },
+        )
+
+        # 一方掉线再回来（宽限内）：回来的这一端要立刻拿到房间里的终端
+        b.end()
+        await self.settle()
+        again = await self.client("c2", host="n1")
+        await self.settle()
+        self.assertTrue(again.last("ROOM_OPEN")["resumed"])
+        rows = again.last("SESSION_LIST")["sessions"]
+        self.assertEqual([row["session_id"] for row in rows], ["s1"])
+
     # ---------------------------------------------------------------- 尺寸仲裁
 
     async def test_resize_only_from_creator(self) -> None:
@@ -304,8 +337,8 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         ctl = await self.client("c1", host="n1")
         await self.create(ctl, sid="s1", token="t1")
         agent_data = await self.open_agent_data("t1")
-        v1 = await self.open_viewer("t1")
-        v2 = await self.open_viewer("t1")
+        v1 = await self.open_viewer("t1", "c1")
+        v2 = await self.open_viewer("t1", "c1")
         await self.answer_snapshots(agent)
 
         await self.feed(agent_data, b"OUTPUT")
@@ -679,12 +712,51 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         await self.open_room(a, "c1", b, "c2")
         await self.create(a, sid="s1", token="t1")
         await self.open_agent_data("t1")
-        viewer = await self.open_viewer("t1")
+        viewer = await self.open_viewer("t1", "c1")
         await self.answer_snapshots(agent)
 
         await self.feed(a, {"type": "ROOM_LEAVE"})
         self.assertNotIn("t1", self.relay.channels)
         self.assertEqual(viewer.closed[0], 4008)
+
+    async def test_data_plane_rejects_viewer_without_identity(self) -> None:
+        """拿着 data_token 直连、不说自己是谁 —— 拒。"""
+        await self.agent("n1")
+        ctl = await self.client("c1", host="n1")
+        await self.create(ctl, sid="s1", token="t1")
+        ws = self.spawn(f"/d/t1?role=ctl&token={TOKEN}")
+        await self.settle()
+        self.assertEqual(ws.closed[0], 4003)
+        self.assertEqual(self.relay.channels["t1"].viewers, {})
+
+    async def test_data_plane_rejects_other_peoples_session(self) -> None:
+        """别人的 token 拿到手也没用：可见域在数据面再判一次。"""
+        await self.agent("n1")
+        c1 = await self.client("c1", host="n1")
+        await self.client("c2", host="n1")
+        await self.create(c1, sid="s1", token="t1")
+        ws = await self.open_viewer("t1", "c2")
+        self.assertEqual(ws.closed[0], 4003)
+        self.assertEqual(self.relay.channels["t1"].viewers, {})
+
+    async def test_data_plane_admits_both_room_members(self) -> None:
+        """房间里的终端，两个成员都进得来；房间外的人进不来。"""
+        agent = await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.client("c3", host="n1")
+        await self.open_room(a, "c1", b, "c2")
+        await self.create(a, sid="s1", token="t1")
+        await self.open_agent_data("t1")
+
+        outside = await self.open_viewer("t1", "c3")
+        self.assertEqual(outside.closed[0], 4003)
+
+        for cid in ("c1", "c2"):
+            viewer = await self.open_viewer("t1", cid)
+            await self.answer_snapshots(agent)
+            self.assertFalse(viewer.closed)
+        self.assertEqual(len(self.relay.channels["t1"].viewers), 2)
 
 
 if __name__ == "__main__":

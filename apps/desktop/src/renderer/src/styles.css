@@ -1094,3 +1094,57 @@ code {
   color: #9ad0ff;
   border-color: rgba(154, 208, 255, 0.35);
 }
+
+/* 通话中：留在列表上，但灰掉不可点。不写对方是谁 —— 小黑屋不在墙上挂牌子 */
+.devicecard__badge--call {
+  background: rgba(255, 196, 92, 0.16);
+  color: #ffc45c;
+}
+
+/* 邀请弹窗：一对一房间的「门」，只有同意才进得去 */
+.modal {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(6, 7, 12, 0.62);
+  backdrop-filter: blur(3px);
+  z-index: 40;
+}
+
+.modal__box {
+  width: min(420px, calc(100vw - 48px));
+  padding: 22px 24px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(120, 140, 200, 0.22);
+  background: #16181f;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.modal__title {
+  margin: 0 0 10px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #eef1f7;
+}
+
+.modal__body {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #c8cede;
+}
+
+.modal__hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #7b8397;
+}
+
+.modal__actions {
+  margin-top: 18px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}

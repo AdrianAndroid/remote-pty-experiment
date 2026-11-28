@@ -73,7 +73,8 @@ const relay = new RelayClient({
   onOwned: (leafId, owned) => send(IpcChannel.SessionOwned, { leafId, owned }),
   onRemoved: (leafId) => send(IpcChannel.SessionRemoved, { leafId }),
   onResized: (leafId, cols, rows) => send(IpcChannel.SessionResized, { leafId, cols, rows }),
-  onPeerClosed: (by, name) => send(IpcChannel.RelayPeerClosed, { by, name })
+  onRoomClosed: (reason, peerName) => send(IpcChannel.RelayRoomClosed, { reason, peerName }),
+  onInvited: (invite) => send(IpcChannel.RelayInvited, invite)
 })
 
 function send(channel: string, payload: unknown): void {
@@ -306,10 +307,23 @@ function registerIpc(): void {
 
   ipcMain.handle(
     IpcChannel.NodeActivate,
-    async (_event, payload: { node: string | null; client?: string | null } | null) => {
-      await relay.setActiveNode(payload?.node ?? null, payload?.client ?? null)
+    async (_event, payload: { node: string | null } | null) => {
+      await relay.setActiveNode(payload?.node ?? null)
     }
   )
+
+  ipcMain.handle(IpcChannel.RoomInvite, async (_event, clientId: string) => {
+    await relay.invite(clientId)
+  })
+  ipcMain.handle(IpcChannel.RoomAccept, async () => {
+    await relay.acceptInvite()
+  })
+  ipcMain.handle(IpcChannel.RoomDecline, async () => {
+    await relay.declineInvite()
+  })
+  ipcMain.handle(IpcChannel.RoomLeave, async () => {
+    await relay.leaveRoom()
+  })
 
   ipcMain.handle(IpcChannel.SessionCreate, async (_event, options) => {
     const result = await relay.create(

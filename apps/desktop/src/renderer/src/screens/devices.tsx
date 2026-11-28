@@ -9,20 +9,20 @@
  * 进别人的客户端才是真正的连接：那条数据通道连到对方认领的宿主上。
  */
 
-import type { ClientInfo, PairInfo } from '../../../shared/ipc'
+import type { ClientInfo } from '../../../shared/ipc'
 
 interface DevicesScreenProps {
   clients: ClientInfo[]
   /** 自己的客户端 id：用来在列表里认出「我」 */
   selfClientId?: string
-  /** relay 的实时配对表：谁正在进我的客户端、我进了谁 */
-  pairs?: PairInfo[]
   /** 中继本身是否还连着（重连中时列表还在，但点不进去） */
   online: boolean
   busy: boolean
   error: string
-  /** 传对方的宿主 node id 与它的客户端 id */
-  onPick: (host: string, clientId: string) => void
+  /** 邀请某个客户端通话（双向同意才建房间） */
+  onInvite: (clientId: string) => void
+  /** 已经发出、还没被答复的邀请 */
+  pendingInvite?: string
   onExitRelay: () => void
   onReload: () => void
   /** 回到自己的终端（「我」那条不给点，但总得有条路回去） */
@@ -32,11 +32,11 @@ interface DevicesScreenProps {
 export function DevicesScreen({
   clients,
   selfClientId = '',
-  pairs = [],
   online,
   busy,
   error,
-  onPick,
+  pendingInvite = '',
+  onInvite,
   onExitRelay,
   onReload,
   onOpenMine
@@ -83,7 +83,8 @@ export function DevicesScreen({
       <div className="devices__body">
         <h1>在线客户端</h1>
         <p className="devices__hint">
-          每个客户端一个个体。进别人的客户端才是真正的连接；离开只是撤掉画面，对方机器上的终端会继续跑。
+          点一个客户端就是发起通话邀请，对方同意后你们进入一对一的私密房间：
+          两边的终端合到一处，房间外的人看不到。离开只是离开房间，宿主上的进程不杀。
         </p>
 
         {error && <p className="devices__error">{error}</p>}
@@ -99,10 +100,11 @@ export function DevicesScreen({
           <ul className="devices__list">
             {sorted.map((item) => {
               const isSelf = !!selfClientId && item.client === selfClientId
-              const enterable = !isSelf && !!item.host && online && !busy
+              // 在通话里的人点不动：不是灰掉"没上线"，是灰掉"正在私密会话"。
+              const inCall = !!item.busy
+              const waiting = pendingInvite === item.client
+              const invitable = !isSelf && !!item.host && online && !busy && !inCall && !waiting
               const sessions = item.sessions ?? 0
-              // 谁正进着我：配对是 relay 记的，不是我这边猜的
-              const viewers = pairs.filter((pair) => pair.to === item.client)
               return (
                 <li key={item.client}>
                   <button
@@ -110,18 +112,22 @@ export function DevicesScreen({
                     className={
                       isSelf
                         ? 'devicecard devicecard--self'
-                        : enterable
+                        : invitable
                           ? 'devicecard'
                           : 'devicecard devicecard--off'
                     }
-                    disabled={!enterable}
-                    onClick={() => onPick(item.host, item.client)}
+                    disabled={!invitable}
+                    onClick={() => onInvite(item.client)}
                     title={
                       isSelf
-                        ? '这是你自己，不用从这里连回去'
-                        : !item.host
-                          ? '这个客户端还没认领宿主（它那台机器上的 agent 没起来）'
-                          : `进入 ${item.name}`
+                        ? '这是你自己。回自己的终端请点右上角「我的终端」'
+                        : inCall
+                          ? '对方正在私密通话中，等他结束再来'
+                          : waiting
+                            ? '邀请已发出，等对方同意'
+                            : !item.host
+                              ? '这个客户端还没认领宿主（它那台机器上的 agent 没起来）'
+                              : `邀请 ${item.name} 一对一通话`
                     }
                   >
                     <span
@@ -131,27 +137,22 @@ export function DevicesScreen({
                       <span className="devicecard__name">
                         {item.name || item.client.slice(0, 8)}
                         {isSelf && <em className="devicecard__badge devicecard__badge--me">我</em>}
+                        {inCall && (
+                          <em className="devicecard__badge devicecard__badge--call">
+                            {item.reconnecting ? '通话中 · 重连中' : '通话中'}
+                          </em>
+                        )}
                       </span>
                       <span className="devicecard__meta">
                         {item.host ? `${sessions} 个终端` : '宿主未上线'}
                         {item.host && item.host_name
                           ? ` · ${item.host_name.replace(/\.local$/, '')}`
                           : ''}
-                        {viewers.length > 0 && (
-                          <em className="devicecard__pair">
-                            「{viewers.map((v) => v.from_name || v.from.slice(0, 8)).join(' / ')}
-                            」正在查看
-                          </em>
-                        )}
                       </span>
                     </span>
                     {!isSelf && (
                       <span className="devicecard__go">
-                        {pairs.some((pair) => pair.from === selfClientId && pair.to === item.client)
-                          ? '配对中'
-                          : enterable
-                            ? '进入 →'
-                            : ''}
+                        {waiting ? '等待同意…' : inCall ? '通话中' : invitable ? '邀请通话 →' : ''}
                       </span>
                     )}
                   </button>

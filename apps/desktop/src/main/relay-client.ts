@@ -92,7 +92,7 @@ import { join } from 'node:path'
 import { app } from 'electron'
 import WebSocket from 'ws'
 import type {
-  ClientInfo, NodeInfo, PairInfo, RelayConfig, RelayStatus } from '../shared/ipc'
+  ClientInfo, InviteView, NodeInfo, RelayConfig, RelayStatus, RoomView } from '../shared/ipc'
 import type { SessionState } from '../shared/protocol'
 import { getProfile } from './profile'
 
@@ -133,14 +133,16 @@ export interface RelayHandlers {
     owner: string
   ): void
   onError(code: string, message: string): void
+  /** 收到邀请：界面弹「谁邀请你」，由用户决定。 */
+  onInvited(invite: InviteView): void
   /** 会话归属变了（relay 告诉了我们谁是主人，或者别的窗口关了它）。 */
   onOwned(leafId: string, owned: boolean): void
   /** PTY 尺寸变了：创建端改了窗口，镜像端得跟着锁到新尺寸。 */
   onResized(leafId: string, cols: number, rows: number): void
   /** 整个节点的终端都没了（宿主退出 / 离线超时）：标签要真删掉，不是变灰。 */
   onRemoved(leafId: string): void
-  /** 配对端主动断开了链路：本端跟着断，且不要自动重连。 */
-  onPeerClosed(by?: string, byName?: string): void
+  /** 房间关了（对方离开 / 宽限超时）：带上原因和对方名字，界面回列表并说明。 */
+  onRoomClosed(reason: string, peerName: string): void
 }
 
 const CONNECT_TIMEOUT = 12_000
@@ -156,8 +158,13 @@ export class RelayClient {
   private hostname = ''
   /** 在线客户端列表（relay 的内存表，断开即消失） */
   private clients: ClientInfo[] = []
-  /** 谁进了我 / 我进了谁（relay 的内存表，同样断开即解除） */
-  private pairs: PairInfo[] = []
+  /** 当前所在的一对一房间。null = S2（待配对），非空 = S3（一对一）。 */
+  private room: RoomView | null = null
+  /** 收到但还没处理的邀请（relay 只记最新一条） */
+  private invites: InviteView[] = []
+  /** 我刚邀请了谁：房间打开时用它判断「这局是我发起的」 */
+  private invitedPeer = ''
+
   /** 我认领的宿主 node id：本机 agent，认领后不再变 */
   private hostNode = ''
 
@@ -217,7 +224,8 @@ export class RelayClient {
       clientName: this.clientName,
       clientId: this.clientId,
       clients: this.clients,
-      pairs: this.pairs
+      room: this.room,
+      invites: this.invites
     }
   }
 
@@ -231,7 +239,8 @@ export class RelayClient {
       clientName: this.clientName,
       clientId: this.clientId,
       clients: this.clients,
-      pairs: this.pairs,
+      room: this.room,
+      invites: this.invites,
       message
     })
   }
@@ -247,7 +256,8 @@ export class RelayClient {
       clientName: this.clientName,
       clientId: this.clientId,
       clients: this.clients,
-      pairs: this.pairs
+      room: this.room,
+      invites: this.invites
     })
   }
 
@@ -318,27 +328,15 @@ export class RelayClient {
    * 否则重连时旧 leafId、旧字节缓冲、旧节点定时器会和 relay 新推的列表打架。
    */
   /**
-   * 进入 / 离开一台设备。
+   * 进 / 离开自己的桌面（私有域）。
    *
-   * 离开只是撤回画面：PTY 不杀、也不进 detached 黑名单（下次进来还要能装回来）。
-   * 列表推送由 activeNode 守卫拦住，不会自己偷偷装回来。
+   * 只在自己的宿主上开终端、只看自己名下的会话。房间是另一条路（见 enterRoom）：
+   * 两者互斥，进入其中一个之前会先把另一个的订阅撤干净，否则两边的会话会混在一个标签列里。
    */
-  async setActiveNode(node: string | null, client: string | null = null): Promise<void> {
-    // 同一个宿主可能挂着好几个客户端（同机开两个），所以「进的是哪台节点」和
-    // 「进的是哪个客户端」是两件事：前面决定订阅哪些终端，后面决定配对给谁看。
-    const pairingChanged = node !== this.activeNode || client !== this.pairedClient
+  async setActiveNode(node: string | null): Promise<void> {
+    if (this.room) this.dropAllSessions()
     this.activeNode = node
-    this.pairedClient = client
-    for (const session of [...this.sessions.values()]) {
-      this.closeData(session)
-      this.sessions.delete(session.leafId)
-      this.bySessionId.delete(session.sessionId)
-      this.readyLeaves.delete(session.leafId)
-      this.buffered.delete(session.leafId)
-      this.pendingReady.delete(session.leafId)
-      this.handlers.onState(session.leafId, 'disconnected')
-    }
-    if (pairingChanged) this.announcePair(node, client)
+    this.dropAllSessions()
     if (!node) return
     const cached = this.lastLists.get(node)
     if (cached) this.syncFromList(cached, node)
@@ -348,8 +346,70 @@ export class RelayClient {
     return this.activeNode
   }
 
+  /** 进入房间的观看范围：房间覆盖双方宿主，两个人都能看房间里全部终端。 */
+  private enterRoom(room: RoomView): void {
+    this.activeNode = null
+    this.room = room
+    this.invites = []
+    this.dropAllSessions()
+    // 房间里可能已经有终端（对方在我掉线期间开的）：主动要一遍，别等下次变更。
+    this.resyncSessions()
+    this.setStatus(this.phase)
+  }
+
+  private leaveRoomLocal(): void {
+    this.room = null
+    this.invites = []
+    this.dropAllSessions()
+    this.setStatus(this.phase)
+  }
+
+  private dropAllSessions(): void {
+    for (const session of [...this.sessions.values()]) {
+      this.closeData(session)
+      this.sessions.delete(session.leafId)
+      this.bySessionId.delete(session.sessionId)
+      this.readyLeaves.delete(session.leafId)
+      this.buffered.delete(session.leafId)
+      this.pendingReady.delete(session.leafId)
+      this.handlers.onState(session.leafId, 'disconnected')
+    }
+  }
+
+  // ------------------------------------------------------------ 房间
+
+  /** 邀请某个客户端。对方同意才会建房间 —— 单向塞进别人桌面已经下线。 */
+  async invite(clientId: string): Promise<void> {
+    if (!clientId || clientId === this.clientId) return
+    this.invitedPeer = clientId
+    this.sendSignal({ type: 'ROOM_INVITE', to: clientId })
+  }
+
+  async acceptInvite(): Promise<void> {
+    this.sendSignal({ type: 'ROOM_ACCEPT' })
+  }
+
+  async declineInvite(): Promise<void> {
+    this.sendSignal({ type: 'ROOM_DECLINE' })
+    this.invites = []
+    this.setStatus(this.phase)
+  }
+
+  /** 主动离开：relay 会同时关掉对方那头，两个人一起回列表。 */
+  async leaveRoom(): Promise<void> {
+    if (!this.room) return
+    this.sendSignal({ type: 'ROOM_LEAVE' })
+    this.leaveRoomLocal()
+  }
+
+  /**
+   * 主动断开：这是「整台客户端退出链路」，不是 kill 也不是单块终端的 detach。
+   *
+   * 宿主上的 PTY 一个都不动，只是这边不再收不发。所以本地状态要**清干净**，
+   * 否则重连时旧 leafId、旧字节缓冲、旧节点定时器会和 relay 新推的列表打架。
+   */
   async disconnect(): Promise<void> {
-    // 先跟 relay 说一声「我主动走的」：它会让配对的另一端也断开。
+    // 先跟 relay 说一声「我主动走的」，它会把房间里另一端也通知到。
     // 网络异常掉线不走这条消息，所以不会误伤别人。
     this.notifyLeave()
     await new Promise((resolve) => setTimeout(resolve, 80))
@@ -357,33 +417,6 @@ export class RelayClient {
     this.resetLocalState()
     this.closeCtl()
     this.setStatus('idle')
-  }
-
-  /** 已经配对上的客户端 id（null = 没在进别人的客户端） */
-  private pairedClient: string | null = null
-
-  /** 告诉 relay「我进了谁 / 我不进了」，这样对方那边也能看到配对状态。 */
-  private announcePair(node: string | null, client: string | null): void {
-    const ws = this.ctl
-    if (!ws || ws.readyState !== 1) return
-    try {
-      // 进自己的宿主（被别人配对后自动进终端列表）不需要配对，否则会配给自己
-      if (node && client && client !== this.clientId) {
-        const target = this.clients.find((item) => item.client === client)
-        ws.send(
-          JSON.stringify({
-            type: 'CTL_PAIR',
-            node,
-            client,
-            to_name: target?.name ?? ''
-          })
-        )
-      } else {
-        ws.send(JSON.stringify({ type: 'CTL_UNPAIR' }))
-      }
-    } catch {
-      // ctl 刚断，重连后会重新发
-    }
   }
 
   /** 告诉 relay 我是主动断开，不是断网。 */
@@ -395,19 +428,6 @@ export class RelayClient {
     } catch {
       // ctl 已经没了，无所谓
     }
-  }
-
-  /**
-   * 配对端主动断开：本端跟着断，而且**不能自动重连** —— 否则刚断就自己连回去，
-   * 另一端再断，来回拉锯。要由用户点「重新连接」才回来。
-   */
-  private handlePeerClosed(by?: string, byName?: string): void {
-    this.manualClose = true
-    this.resetLocalState()
-    this.closeCtl()
-    // 有名字就说「谁」断的，没有就退回泛称
-    this.setStatus('idle', byName ? `${byName} 已断开连接` : '另一端已断开连接')
-    this.handlers.onPeerClosed(by, byName)
   }
 
   /** 清掉本地与这次链路相关的全部状态，PTY 一个都不碰。 */
@@ -428,6 +448,8 @@ export class RelayClient {
     this.indexLeaves.clear()
     this.detached.clear()
     this.activeNode = null
+    this.room = null
+    this.invites = []
     this.lastLists.clear()
     this.hostname = ''
     this.nodes = []
@@ -464,14 +486,19 @@ export class RelayClient {
   private wsUrl(path: string): string {
     const base = (this.config?.url ?? '').replace(/\/+$/, '')
     const sep = path.includes('?') ? '&' : '?'
-    // primary=1：这个客户端用的是默认数据目录，是自己这台机器上的"主窗口"。
-    // relay 用它来决定无主会话归谁 —— 主窗口无标，副本窗口标共享，两边不会都标。
-    const who = path.startsWith('/ctl')
-      ? `&client=${encodeURIComponent(this.clientId)}&name=${encodeURIComponent(this.clientName)}${
-          this.hostNode ? `&host=${encodeURIComponent(this.hostNode)}` : ''
-        }${getProfile().isDefault ? '&primary=1' : ''}`
-      : ''
-    return `${base}${path}${sep}token=${encodeURIComponent(this.config?.token ?? '')}${who}`
+    const params = [`token=${encodeURIComponent(this.config?.token ?? '')}`]
+    // 每个端点都要带 client 身份：
+    // - /ctl：relay 靠它记「我是谁」，列表、房间、归属全挂在它上面
+    // - /d/<token>：数据面也要校验可见域，不报身份一律 4003（小黑屋的门在数据面这一侧）
+    params.push(`client=${encodeURIComponent(this.clientId)}`)
+    if (path.startsWith('/ctl')) {
+      params.push(`name=${encodeURIComponent(this.clientName)}`)
+      if (this.hostNode) params.push(`host=${encodeURIComponent(this.hostNode)}`)
+      // primary=1：这个客户端用的是默认数据目录，是自己这台机器上的"主窗口"。
+      // relay 用它来决定无主会话归谁 —— 主窗口无标，副本窗口标共享，两边不会都标。
+      if (getProfile().isDefault) params.push('primary=1')
+    }
+    return `${base}${path}${sep}${params.join('&')}`
   }
 
   private openCtl(): Promise<void> {
@@ -573,16 +600,13 @@ export class RelayClient {
         // 重新连上 = 重新和宿主对表：之前手动撤掉的镜像会话，只要 PTY 还在就再挂回来。
         this.detached.clear()
         if (Array.isArray(msg.clients)) this.clients = msg.clients as ClientInfo[]
-        if (Array.isArray(msg.pairs)) this.pairs = msg.pairs as PairInfo[]
         if (msg.nodes) this.updateNodes(msg.nodes)
         else this.setAgentOnline(Boolean(msg.agent_online))
         this.setStatus('online')
         this.backoff = 600
         if (this.hostNode) this.claimHost(this.hostNode)
-        // 重连后要把「我还在谁那儿」重新报一次，不然对方那边配对就丢了
-        if (this.activeNode && this.pairedClient) {
-          this.announcePair(this.activeNode, this.pairedClient)
-        }
+        // 重连后如果还在房间里，relay 会补一条 ROOM_OPEN(resumed) —— 房间是它的状态，
+        // 不需要客户端这边重新申报。
         this.resyncSessions()
         break
 
@@ -593,7 +617,12 @@ export class RelayClient {
       case 'CLIENTS':
         if (Array.isArray(msg.clients)) {
           this.clients = msg.clients as ClientInfo[]
-          if (Array.isArray(msg.pairs)) this.pairs = msg.pairs as PairInfo[]
+          // 房间开着、但对方名字空着（它比我后重连，relay 当时还没有它的卡片）：
+          // 用这份在线列表补上，别让标题栏一直挂着裸 client id。
+          if (this.room && !this.room.peer.name) {
+            const peer = this.clients.find((item) => item.client === this.room?.peer.client)
+            if (peer?.name) this.room = { ...this.room, peer: { ...this.room.peer, name: peer.name } }
+          }
           this.setStatus(this.phase)
         }
         break
@@ -690,13 +719,81 @@ export class RelayClient {
         break
       }
 
-      case 'PAIR_CLOSED':
-        // 另一端点了「断开连接」：这条链路的两头算一组，一起断。
-        this.handlePeerClosed(
-          msg.by ? String(msg.by) : undefined,
-          msg.by_name ? String(msg.by_name) : undefined
-        )
+      case 'ROOM_INVITED':
+        // 邀请已送达对方，等它同意。不建界面状态，免得用户以为已经连上了。
         break
+
+      case 'ROOM_INVITE': {
+        const from = (msg.from ?? {}) as Record<string, unknown>
+        const invite = {
+          client: String(from.client ?? ''),
+          name: String(from.name ?? ''),
+          host: from.host ? String(from.host) : ''
+        }
+        if (!invite.client) break
+        this.invites = [invite]
+        this.setStatus(this.phase)
+        this.handlers.onInvited(invite)
+        break
+      }
+
+      case 'ROOM_OPEN': {
+        const peer = (msg.peer ?? {}) as Record<string, unknown>
+        const room: RoomView = {
+          id: String(msg.room ?? ''),
+          peer: {
+            client: String(peer.client ?? ''),
+            name: String(peer.name ?? ''),
+            host: peer.host ? String(peer.host) : ''
+          },
+          phase: 'open',
+          initiator: this.invitedPeer === String(peer.client ?? '')
+        }
+        this.invitedPeer = ''
+
+        this.enterRoom(room)
+        break
+      }
+
+      case 'ROOM_CLOSED': {
+        const peerName = this.room?.peer.name ?? ''
+        const reason = String(msg.reason ?? 'left')
+        this.leaveRoomLocal()
+        this.handlers.onRoomClosed(reason, peerName)
+        break
+      }
+
+      case 'ROOM_PEER_GONE': {
+        if (!this.room) break
+        // 对方掉线：房间还在，宽限期内等它回来。界面显示「重连中」，不是「已断开」。
+        this.room = {
+          ...this.room,
+          phase: 'half',
+          grace: Number(msg.grace ?? 30) || 30
+        }
+        this.setStatus(this.phase)
+        break
+      }
+
+      case 'ROOM_PEER_BACK': {
+        if (!this.room) break
+        this.room = { ...this.room, phase: 'open', grace: undefined }
+        this.setStatus(this.phase)
+        break
+      }
+
+      case 'ROOM_DECLINED': {
+        // 对方拒绝：不发房间，只提示一句。列表刷新由 relay 的 CLIENTS 推送完成。
+        this.invites = []
+        this.setStatus(this.phase)
+        this.handlers.onError('declined', '对方拒绝了通话邀请')
+        break
+      }
+
+      case 'ROOM_EXPIRED': {
+        this.handlers.onError('expired', '邀请已过期，请重新发起')
+        break
+      }
 
       case 'ERROR':
         this.handlers.onError(String(msg.code ?? 'unknown'), String(msg.message ?? ''))
@@ -766,8 +863,13 @@ export class RelayClient {
     if (!Array.isArray(raw)) return
     // 没进入设备也要记下来：点进去的那一刻才有东西可挂。
     this.lastLists.set(node, raw)
-    // 停在列表页、或者这条列表属于别的机器：只看不挂。
-    if (!this.activeNode || (node && node !== this.activeNode)) return
+    // 房间：relay 已经按可见域逐行筛过，这里收到的就是我能看的，全部挂上。
+    // 私有桌面：只挂我进入的那台机器。
+    // 停在列表页（两样都没有）：只看不挂 —— 这也是启动时的状态。
+    const inScope = this.room
+      ? true
+      : this.activeNode !== null && (!node || node === this.activeNode)
+    if (!inScope) return
     const seen = new Set<string>()
     for (const item of raw) {
       if (!item || typeof item !== 'object') continue
@@ -960,6 +1062,12 @@ export class RelayClient {
     // 没指定目标：只有一台在线就它，多台则要求显式选择（避免开错机器）。
     const online = this.nodes.filter((n) => n.online)
     let nodeId = target ?? ''
+    if (!nodeId && this.room) {
+      // 房间里：优先开在自己的机器上（那是我的 shell），自己没有宿主就开在对方的。
+      const own = online.find((n) => n.node === this.hostNode)?.node ?? ''
+      nodeId = own || this.room.peer.host || ''
+      if (!nodeId) return { ok: false, error: '双方宿主都不在线，开不了终端' }
+    }
     if (!nodeId) {
       if (online.length === 1) nodeId = online[0].node
       else if (online.length === 0) return { ok: false, error: '没有可用的宿主节点' }
@@ -982,8 +1090,8 @@ export class RelayClient {
       dataTimer: null,
       pending: [],
       owned: true,
-      // 我在别人客户端里开终端 = 开在对方桌面上（relay 也是这么记的）
-      owner: this.pairedClient ?? this.clientId,
+      // 归属由 relay 决定：房间里的终端挂房间（owner 为空），私有桌面上的挂我自己。
+      owner: this.room ? '' : this.clientId,
       node: nodeId,
       createdAt: Date.now()
     }

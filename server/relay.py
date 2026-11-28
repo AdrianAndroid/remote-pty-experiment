@@ -379,7 +379,8 @@ class Relay:
             query = parse_qs(urlparse(path).query)
             role = (query.get("role") or ["ctl"])[0]
             node_id = (query.get("node") or [""])[0]
-            await self.handle_data(ws, token, role, node_id)
+            client_id = (query.get("client") or [""])[0]
+            await self.handle_data(ws, token, role, node_id, client_id)
         else:
             await ws.close(code=4004, reason="unknown route")
 
@@ -530,6 +531,29 @@ class Relay:
 
     # ------------------------------------------------------------ 可见性
 
+    async def _push_session_lists(
+        self, client_id: str, ws: Optional[Any] = None
+    ) -> None:
+        """把这个客户端能看的会话列表推一遍（逐行过滤，绝不整份转手）。
+
+        HELLO 时推一次让客户端认路；房间刚开 / 重连回房间时再推一次 ——
+        不然宽限期内别人在房间里开的终端，回来的这一端要等到下次变更才看得见。
+        """
+        for node in self.nodes.values():
+            if node.last_list is None:
+                continue
+            decorated = self.decorate_sessions(node.last_list)
+            rows = [
+                row
+                for row in (decorated.get("sessions") or [])
+                if self._row_visible(client_id, row)
+            ]
+            payload = {**decorated, "sessions": rows}
+            if ws is not None:
+                await self.send_json(ws, payload)
+            else:
+                await self._send_to_client(client_id, payload)
+
     def _session_visible(self, client_id: str, session: Session) -> bool:
         """一条终端对某个客户端是否可见 —— 「小黑屋」的唯一判据。
 
@@ -613,6 +637,8 @@ class Relay:
                     },
                 },
             )
+        for cid in (a, b):
+            await self._push_session_lists(cid)
         LOG.info("房间 %s 打开：%s <-> %s", room.id, a[:8], b[:8])
         await self.broadcast_clients()
         return room
@@ -711,6 +737,7 @@ class Relay:
                     "resumed": True,
                 },
             )
+            await self._push_session_lists(client.id)
             await self.broadcast_clients()
             return
 
@@ -1124,15 +1151,7 @@ class Relay:
         #
         # 注意这里必须逐行过滤：这是 client 刚连上、还没进任何房间的时刻，
         # 直接把 node.last_list 原样发出去，等于把别人房间里的终端编号告诉他。
-        for node in self.nodes.values():
-            if node.last_list is not None:
-                decorated = self.decorate_sessions(node.last_list)
-                rows = [
-                    row
-                    for row in (decorated.get("sessions") or [])
-                    if self._row_visible(client.id, row)
-                ]
-                await self.send_json(ws, {**decorated, "sessions": rows})
+        await self._push_session_lists(client.id, ws)
         # 再让每个节点补发一次权威列表（缓存可能过期：刚关/刚建）。
         for node in self.nodes.values():
             if node.ws is not None:
@@ -1434,14 +1453,37 @@ class Relay:
         if channel.agent is None and not channel.viewers:
             self.channels.pop(token, None)
 
+    def _session_by_token(self, token: str) -> Optional[Session]:
+        """按 data_token 反查会话。会话数在几十的量级，线性扫足够。"""
+        for session in self.sessions.values():
+            if session.token == token:
+                return session
+        return None
+
     async def handle_data(
-        self, ws: Any, token: str, role: str, node_id: str = ""
+        self, ws: Any, token: str, role: str, node_id: str = "", client_id: str = ""
     ) -> None:
         """一个 data_token 下的多播通道。
 
         role=agent：唯一一条，PTY 宿主。它发来的字节广播给所有 viewer。
-        role=ctl  ：任意多条，都是 viewer。谁发的字节都转给 agent。
+        role=ctl  ：观看者。**必须带 client 身份**，且这条会话对它是可见的；
+                    否则 4003 —— 拿着 token 直连也进不来，这是小黑屋在数据面的那道门。
         """
+        session = self._session_by_token(token)
+        if role == "ctl":
+            allowed = bool(session) and bool(client_id) and self._session_visible(
+                client_id, session
+            )
+            if not allowed:
+                LOG.warning(
+                    "数据面拒绝：token=%s client=%s（会话 %s）",
+                    token[:8],
+                    client_id[:8] or "-",
+                    "不存在" if session is None else "不可见",
+                )
+                await ws.close(code=4003, reason="forbidden")
+                return
+
         channel = self._ensure_channel(token)
 
         if role == "agent":

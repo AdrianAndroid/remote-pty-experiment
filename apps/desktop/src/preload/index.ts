@@ -27,8 +27,12 @@ const bridge: RptyBridge = {
   disconnect: () => ipcRenderer.invoke(IpcChannel.RelayDisconnect),
   reconnect: () => ipcRenderer.invoke(IpcChannel.RelayReconnect),
   getStatus: () => ipcRenderer.invoke(IpcChannel.RelayStatus),
-  activateNode: (node: string | null, client?: string | null) =>
-    ipcRenderer.invoke(IpcChannel.NodeActivate, { node, client: client ?? null }),
+  activateNode: (node: string | null) =>
+    ipcRenderer.invoke(IpcChannel.NodeActivate, { node }),
+  invite: (clientId: string) => ipcRenderer.invoke(IpcChannel.RoomInvite, clientId),
+  acceptInvite: () => ipcRenderer.invoke(IpcChannel.RoomAccept),
+  declineInvite: () => ipcRenderer.invoke(IpcChannel.RoomDecline),
+  leaveRoom: () => ipcRenderer.invoke(IpcChannel.RoomLeave),
   getConfigInfo: (): Promise<ConfigInfo> => ipcRenderer.invoke(IpcChannel.ConfigInfo),
 
   create: (options: SessionCreateOptions): Promise<SessionCreateResult> =>
@@ -54,7 +58,8 @@ const bridge: RptyBridge = {
   onOwned: subscribe(IpcChannel.SessionOwned),
   onRemoved: subscribe(IpcChannel.SessionRemoved),
   onResized: subscribe(IpcChannel.SessionResized),
-  onPeerClosed: subscribe(IpcChannel.RelayPeerClosed),
+  onRoomClosed: subscribe(IpcChannel.RelayRoomClosed),
+  onInvited: subscribe(IpcChannel.RelayInvited),
   onStatus: subscribe<RelayStatus>(IpcChannel.RelayStatusChanged),
   onError: subscribe(IpcChannel.RelayError),
   onMenu: (handler: (command: MenuCommand, arg?: number) => void) => {

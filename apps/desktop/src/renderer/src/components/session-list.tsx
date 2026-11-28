@@ -46,8 +46,8 @@ interface SessionListProps {
   onToggleReadOnly: () => void
   /** 离开这个客户端（撤画面回列表），不是断中继 */
   onDisconnect: () => void
-  /** 配对上的对方客户端名（relay 确认后才显示「已配对」） */
-  pairedWith?: string
+  /** 这一屏是一对一房间：文案要说「通话」，不要说「宿主机」 */
+  room?: boolean
   /** 返回在线客户端列表（只撤画面，对方宿主上的 PTY 不动） */
   onBack?: () => void
   backLabel?: string
@@ -76,7 +76,7 @@ export function SessionList({
   onToggle,
   onToggleReadOnly,
   onDisconnect,
-  pairedWith,
+  room = false,
   onBack,
   backLabel = '客户端'
 }: SessionListProps): React.JSX.Element {
@@ -88,9 +88,11 @@ export function SessionList({
         <div
           className="sidebar__brand"
           title={
-            hostname
-              ? `所有终端的 shell 都跑在这台宿主机上：${hostname}`
-              : '未连接'
+            room
+              ? `一对一私密房间：与 ${hostname} 通话中，房间外的人看不到这些终端`
+              : hostname
+                ? `所有终端的 shell 都跑在这台宿主机上：${hostname}`
+                : '未连接'
           }
         >
           <span className="sidebar__logo">▚</span>
@@ -100,11 +102,11 @@ export function SessionList({
               <span className={online ? 'dot dot--on' : 'dot dot--off'}>
                 {online ? (
                   <>
-                    <span className="sidebar__role">客户端</span>
+                    <span className="sidebar__role">{room ? '通话' : '客户端'}</span>
                     {(hostname || '已连接').replace(/\.local$/, '')}
-                    {pairedWith && (
-                      <span className="sidebar__paired" title={`已配对：${pairedWith}`}>
-                        已配对
+                    {room && (
+                      <span className="sidebar__paired" title="一对一私密房间">
+                        通话中
                       </span>
                     )}
                   </>

@@ -19,8 +19,14 @@ export const IpcChannel = {
   RelayStatus: 'relay:status',
   /** 渲染 -> 主：读取已保存的地址与「是否有 token」 */
   ConfigInfo: 'config:info',
-  /** 渲染 -> 主：进入 / 离开一台设备（null = 回设备列表，不为任何会话开数据通道） */
+  /** 渲染 -> 主：进入 / 离开自己的桌面（null = 回设备列表，不为任何会话开数据通道） */
   NodeActivate: 'node:activate',
+
+  /** 渲染 -> 主：房间。邀请 / 同意 / 拒绝 / 主动离开 */
+  RoomInvite: 'room:invite',
+  RoomAccept: 'room:accept',
+  RoomDecline: 'room:decline',
+  RoomLeave: 'room:leave',
 
   /** 渲染 -> 主：开一个会话 */
   SessionCreate: 'session:create',
@@ -51,8 +57,10 @@ export const IpcChannel = {
   SessionStateChanged: 'session:state',
   SessionExit: 'session:exit',
   RelayStatusChanged: 'relay:status-changed',
-  /** 主 -> 渲染：配对的另一端主动断开了链路 */
-  RelayPeerClosed: 'relay:peer-closed',
+  /** 主 -> 渲染：房间关了（对方离开 / 宽限超时） */
+  RelayRoomClosed: 'relay:room-closed',
+  /** 主 -> 渲染：收到通话邀请 */
+  RelayInvited: 'relay:invited',
   RelayError: 'relay:error',
   /** 主 -> 渲染：菜单命令 */
   MenuCommand: 'menu:command'
@@ -94,14 +102,6 @@ export interface NodeInfo {
 }
 
 /** 在线客户端：用户看到的就是这个列表，断开 WSS 就从列表里消失。 */
-/** 一次配对：谁进了谁的客户端（relay 内存里的实时表） */
-export interface PairInfo {
-  from: string
-  from_name?: string
-  to: string
-  to_name?: string
-  node?: string
-}
 
 export interface ClientInfo {
   /** 客户端 id：固定，不重装不变 */
@@ -115,6 +115,37 @@ export interface ClientInfo {
   host_online?: boolean
   /** 宿主上现有会话数 */
   sessions?: number
+  /** 正在私密通话中：列表上点不动，但不写对方是谁 */
+  busy?: boolean
+  /** 在通话中，但一方掉线正在等重连（宽限期） */
+  reconnecting?: boolean
+}
+
+/** 一对一房间里的对方。只有「名字 + 宿主」，没有更多 —— 房间里的事不外泄。 */
+export interface RoomPeer {
+  client: string
+  name: string
+  /** 对方的宿主 node id：房间里新建终端可以落在它上面 */
+  host?: string
+}
+
+/** 一对一私密房间。有它就是 S3，没有就是 S2。 */
+export interface RoomView {
+  id: string
+  peer: RoomPeer
+  /** open = 两个人都在；half = 对方掉线，宽限期内在等它回来 */
+  phase: 'open' | 'half'
+  /** half 时的剩余秒数（粗粒度，界面只用来显示「重连中」） */
+  grace?: number
+  /** 是不是我发起的邀请 */
+  initiator: boolean
+}
+
+/** 收到的邀请（待我同意）。同一时刻最多一条 —— relay 只记最新一条。 */
+export interface InviteView {
+  client: string
+  name: string
+  host?: string
 }
 
 export interface RelayStatus {
@@ -130,8 +161,10 @@ export interface RelayStatus {
   clientId?: string
   /** relay 内存里的在线客户端列表 */
   clients?: ClientInfo[]
-  /** 当前所有配对。「我进谁」和「谁进我」都从这张表读 */
-  pairs?: PairInfo[]
+  /** 当前所在的房间；null = 停在列表（S2） */
+  room?: RoomView | null
+  /** 待我处理的邀请 */
+  invites?: InviteView[]
   message?: string
 }
 
@@ -203,8 +236,15 @@ export interface RptyBridge {
   reconnect(): Promise<RelayStatus>
   getStatus(): Promise<RelayStatus>
   getConfigInfo(): Promise<ConfigInfo>
-  /** 进入某台设备（node），或传 null 回到设备列表 */
-  activateNode(node: string | null, client?: string | null): Promise<void>
+  /** 进自己的桌面（node），或传 null 回到设备列表 */
+  activateNode(node: string | null): Promise<void>
+
+  /** 邀请某个客户端进私密通话（对方同意才建房间） */
+  invite(clientId: string): Promise<void>
+  acceptInvite(): Promise<void>
+  declineInvite(): Promise<void>
+  /** 主动离开房间：两个人一起回列表 */
+  leaveRoom(): Promise<void>
 
   create(options: SessionCreateOptions): Promise<SessionCreateResult>
   write(leafId: string, data: string): void
@@ -227,8 +267,10 @@ export interface RptyBridge {
   onRemoved(handler: (payload: { leafId: string }) => void): () => void
   onResized(handler: (payload: SessionResizedPayload) => void): () => void
   onStatus(handler: (payload: RelayStatus) => void): () => void
-  /** 另一端点了「断开连接」：本端跟着断，需要用户点「重新连接」才回来 */
-  onPeerClosed(handler: (payload: { by?: string; name?: string }) => void): () => void
+  /** 房间关了：回列表并说明是对方离开还是超时 */
+  onRoomClosed(handler: (payload: { reason: string; peerName: string }) => void): () => void
+  /** 收到通话邀请：弹窗由用户决定 */
+  onInvited(handler: (invite: InviteView) => void): () => void
   onError(handler: (payload: RelayErrorPayload) => void): () => void
   onMenu(handler: (command: MenuCommand, arg?: number) => void): () => void
 }
