@@ -92,8 +92,10 @@ import { join } from 'node:path'
 import { app } from 'electron'
 import WebSocket from 'ws'
 import type {
-  ClientInfo, InviteView, NodeInfo, RelayConfig, RelayStatus, RoomView } from '../shared/ipc'
+  ClientInfo, JoinResult, NodeInfo, PasswordInfo, RelayConfig, RelayStatus, RoomView
+} from '../shared/ipc'
 import type { SessionState } from '../shared/protocol'
+import { DEFAULT_PASSWORD, loadPassword, savePassword } from './password'
 import { getProfile } from './profile'
 
 interface RemoteSession {
@@ -133,16 +135,14 @@ export interface RelayHandlers {
     owner: string
   ): void
   onError(code: string, message: string): void
-  /** 收到邀请：界面弹「谁邀请你」，由用户决定。 */
-  onInvited(invite: InviteView): void
   /** 会话归属变了（relay 告诉了我们谁是主人，或者别的窗口关了它）。 */
   onOwned(leafId: string, owned: boolean): void
   /** PTY 尺寸变了：创建端改了窗口，镜像端得跟着锁到新尺寸。 */
   onResized(leafId: string, cols: number, rows: number): void
   /** 整个节点的终端都没了（宿主退出 / 离线超时）：标签要真删掉，不是变灰。 */
   onRemoved(leafId: string): void
-  /** 房间关了（对方离开 / 宽限超时）：带上原因和对方名字，界面回列表并说明。 */
-  onRoomClosed(reason: string, peerName: string): void
+  /** 房间关了（对方离开 / 我主动离开 / 宽限超时）：带原因、对方名字、是不是我走的。 */
+  onRoomClosed(reason: string, peerName: string, byMe: boolean): void
 }
 
 const CONNECT_TIMEOUT = 12_000
@@ -160,10 +160,12 @@ export class RelayClient {
   private clients: ClientInfo[] = []
   /** 当前所在的一对一房间。null = S2（待配对），非空 = S3（一对一）。 */
   private room: RoomView | null = null
-  /** 收到但还没处理的邀请（relay 只记最新一条） */
-  private invites: InviteView[] = []
-  /** 我刚邀请了谁：房间打开时用它判断「这局是我发起的」 */
-  private invitedPeer = ''
+  /** 我刚发起配对的是谁：房间打开时用它判断「这局是我发起的」 */
+  private joiningPeer = ''
+  /** 自己的通话密码（明文，只在本地）；连上就上报给 relay 存哈希 */
+  private password = loadPassword()
+  /** relay 说我还用着默认密码 admin123 */
+  private passwordIsDefault = this.password === DEFAULT_PASSWORD
 
   /** 我认领的宿主 node id：本机 agent，认领后不再变 */
   private hostNode = ''
@@ -225,7 +227,7 @@ export class RelayClient {
       clientId: this.clientId,
       clients: this.clients,
       room: this.room,
-      invites: this.invites
+      passwordIsDefault: this.passwordIsDefault
     }
   }
 
@@ -240,7 +242,7 @@ export class RelayClient {
       clientId: this.clientId,
       clients: this.clients,
       room: this.room,
-      invites: this.invites,
+      passwordIsDefault: this.passwordIsDefault,
       message
     })
   }
@@ -257,7 +259,7 @@ export class RelayClient {
       clientId: this.clientId,
       clients: this.clients,
       room: this.room,
-      invites: this.invites
+      passwordIsDefault: this.passwordIsDefault
     })
   }
 
@@ -368,7 +370,6 @@ export class RelayClient {
   private enterRoom(room: RoomView): void {
     this.activeNode = null
     this.room = room
-    this.invites = []
     this.dropAllSessions()
     // 房间里可能已经有终端（对方在我掉线期间开的）：主动要一遍，别等下次变更。
     this.resyncSessions()
@@ -377,7 +378,6 @@ export class RelayClient {
 
   private leaveRoomLocal(): void {
     this.room = null
-    this.invites = []
     this.dropAllSessions()
     this.setStatus(this.phase)
   }
@@ -396,21 +396,42 @@ export class RelayClient {
 
   // ------------------------------------------------------------ 房间
 
-  /** 邀请某个客户端。对方同意才会建房间 —— 单向塞进别人桌面已经下线。 */
-  async invite(clientId: string): Promise<void> {
-    if (!clientId || clientId === this.clientId) return
-    this.invitedPeer = clientId
-    this.sendSignal({ type: 'ROOM_INVITE', to: clientId })
+  /**
+   * 输密码直接配对。密码对了 relay 立刻建房，双方同时收到 ROOM_OPEN ——
+   * 不再有「对方点同意」这一步，对方甚至不需要在键盘前。
+   */
+  async joinRoom(clientId: string, password: string): Promise<JoinResult> {
+    if (!this.ctl || this.ctl.readyState !== 1) {
+      return { ok: false, code: 'offline', message: '中继没连上，先重新连接' }
+    }
+    if (!clientId || clientId === this.clientId) {
+      return { ok: false, code: 'self', message: '不能连自己' }
+    }
+    if (!password) return { ok: false, code: 'empty', message: '请输入对方的通话密码' }
+    this.joiningPeer = clientId
+    this.sendSignal({ type: 'ROOM_JOIN', to: clientId, password })
+    return { ok: true }
   }
 
-  async acceptInvite(): Promise<void> {
-    this.sendSignal({ type: 'ROOM_ACCEPT' })
+  /** 自己的密码：界面上要能看见，也要知道是不是还在用默认值。 */
+  getPasswordInfo(): PasswordInfo {
+    return { password: this.password, isDefault: this.passwordIsDefault }
   }
 
-  async declineInvite(): Promise<void> {
-    this.sendSignal({ type: 'ROOM_DECLINE' })
-    this.invites = []
+  /** 改自己的密码：落盘 → 立刻上报 relay，旧密码立即失效。 */
+  async setPassword(password: string): Promise<JoinResult> {
+    const saved = savePassword(password)
+    if (!saved.ok) return { ok: false, code: 'password_short', message: saved.error }
+    this.password = password.trim()
+    this.syncPassword()
     this.setStatus(this.phase)
+    return { ok: true }
+  }
+
+  /** 把密码报给 relay（连上就报，改完再报一次）。relay 只存哈希。 */
+  private syncPassword(): void {
+    if (!this.password) return
+    this.sendSignal({ type: 'CTL_PASSWORD', password: this.password })
   }
 
   /** 主动离开：relay 会同时关掉对方那头，两个人一起回列表。 */
@@ -467,7 +488,7 @@ export class RelayClient {
     this.detached.clear()
     this.activeNode = null
     this.room = null
-    this.invites = []
+    this.joiningPeer = ''
     this.lastLists.clear()
     this.hostname = ''
     this.nodes = []
@@ -623,6 +644,8 @@ export class RelayClient {
         this.setStatus('online')
         this.backoff = 600
         if (this.hostNode) this.claimHost(this.hostNode)
+        // 每次握手都重报：relay 重启后只存内存，不重报就没人能连进来。
+        this.syncPassword()
         // 重连后如果还在房间里，relay 会补一条 ROOM_OPEN(resumed) —— 房间是它的状态，
         // 不需要客户端这边重新申报。
         this.resyncSessions()
@@ -737,24 +760,6 @@ export class RelayClient {
         break
       }
 
-      case 'ROOM_INVITED':
-        // 邀请已送达对方，等它同意。不建界面状态，免得用户以为已经连上了。
-        break
-
-      case 'ROOM_INVITE': {
-        const from = (msg.from ?? {}) as Record<string, unknown>
-        const invite = {
-          client: String(from.client ?? ''),
-          name: String(from.name ?? ''),
-          host: from.host ? String(from.host) : ''
-        }
-        if (!invite.client) break
-        this.invites = [invite]
-        this.setStatus(this.phase)
-        this.handlers.onInvited(invite)
-        break
-      }
-
       case 'ROOM_OPEN': {
         const peer = (msg.peer ?? {}) as Record<string, unknown>
         const room: RoomView = {
@@ -765,9 +770,9 @@ export class RelayClient {
             host: peer.host ? String(peer.host) : ''
           },
           phase: 'open',
-          initiator: this.invitedPeer === String(peer.client ?? '')
+          initiator: this.joiningPeer === String(peer.client ?? '')
         }
-        this.invitedPeer = ''
+        this.joiningPeer = ''
 
         this.enterRoom(room)
         break
@@ -776,8 +781,10 @@ export class RelayClient {
       case 'ROOM_CLOSED': {
         const peerName = this.room?.peer.name ?? ''
         const reason = String(msg.reason ?? 'left')
+        // 走的是我自己还是对方：文案不一样（「你已离开」vs「某某离开了」）。
+        const byMe = String(msg.by ?? '') === this.clientId
         this.leaveRoomLocal()
-        this.handlers.onRoomClosed(reason, peerName)
+        this.handlers.onRoomClosed(reason, peerName, byMe)
         break
       }
 
@@ -800,22 +807,28 @@ export class RelayClient {
         break
       }
 
-      case 'ROOM_DECLINED': {
-        // 对方拒绝：不发房间，只提示一句。列表刷新由 relay 的 CLIENTS 推送完成。
-        this.invites = []
+      case 'PASSWORD_SET': {
+        // relay 只回一句「你是不是还在用默认密码」，不回任何密码内容。
+        this.passwordIsDefault = Boolean(msg.default)
         this.setStatus(this.phase)
-        this.handlers.onError('declined', '对方拒绝了通话邀请')
         break
       }
 
-      case 'ROOM_EXPIRED': {
-        this.handlers.onError('expired', '邀请已过期，请重新发起')
+      case 'ERROR': {
+        const code = String(msg.code ?? 'unknown')
+        // 配对相关错误：这次尝试结束了，别让 joiningPeer 挂在那儿影响下一次判断。
+        if (
+          code === 'bad_password' ||
+          code === 'peer_busy' ||
+          code === 'busy' ||
+          code === 'offline' ||
+          code === 'no_password'
+        ) {
+          this.joiningPeer = ''
+        }
+        this.handlers.onError(code, String(msg.message ?? ''))
         break
       }
-
-      case 'ERROR':
-        this.handlers.onError(String(msg.code ?? 'unknown'), String(msg.message ?? ''))
-        break
 
       default:
         break

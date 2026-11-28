@@ -22,11 +22,12 @@ export const IpcChannel = {
   /** 渲染 -> 主：进入 / 离开自己的桌面（null = 回设备列表，不为任何会话开数据通道） */
   NodeActivate: 'node:activate',
 
-  /** 渲染 -> 主：房间。邀请 / 同意 / 拒绝 / 主动离开 */
-  RoomInvite: 'room:invite',
-  RoomAccept: 'room:accept',
-  RoomDecline: 'room:decline',
+  /** 渲染 -> 主：房间。输密码直接配对 / 主动离开 */
+  RoomJoin: 'room:join',
   RoomLeave: 'room:leave',
+  /** 渲染 -> 主：查 / 改自己的通话密码 */
+  PasswordInfo: 'auth:password-info',
+  PasswordSet: 'auth:set-password',
 
   /** 渲染 -> 主：开一个会话 */
   SessionCreate: 'session:create',
@@ -59,8 +60,6 @@ export const IpcChannel = {
   RelayStatusChanged: 'relay:status-changed',
   /** 主 -> 渲染：房间关了（对方离开 / 宽限超时） */
   RelayRoomClosed: 'relay:room-closed',
-  /** 主 -> 渲染：收到通话邀请 */
-  RelayInvited: 'relay:invited',
   RelayError: 'relay:error',
   /** 主 -> 渲染：菜单命令 */
   MenuCommand: 'menu:command',
@@ -122,6 +121,10 @@ export interface ClientInfo {
   busy?: boolean
   /** 在通话中，但一方掉线正在等重连（宽限期） */
   reconnecting?: boolean
+  /** 这个客户端已经上报过密码：false = 老客户端，点也进不去 */
+  password?: boolean
+  /** 它还在用默认密码 admin123：卡片上要标出来（不泄露密码本身） */
+  password_default?: boolean
 }
 
 /** 一对一房间里的对方。只有「名字 + 宿主」，没有更多 —— 房间里的事不外泄。 */
@@ -144,11 +147,18 @@ export interface RoomView {
   initiator: boolean
 }
 
-/** 收到的邀请（待我同意）。同一时刻最多一条 —— relay 只记最新一条。 */
-export interface InviteView {
-  client: string
-  name: string
-  host?: string
+/** 自己的通话密码。明文只在客户端本地，界面要能看见/修改它。 */
+export interface PasswordInfo {
+  password: string
+  /** 还是出厂默认的 admin123：要在界面上显性提示 */
+  isDefault: boolean
+}
+
+/** 配对结果：密码错、对方忙、对方离线都在这里回给弹窗，不写全局错误条。 */
+export interface JoinResult {
+  ok: boolean
+  code?: string
+  message?: string
 }
 
 export interface RelayStatus {
@@ -166,8 +176,8 @@ export interface RelayStatus {
   clients?: ClientInfo[]
   /** 当前所在的房间；null = 停在列表（S2） */
   room?: RoomView | null
-  /** 待我处理的邀请 */
-  invites?: InviteView[]
+  /** 自己还在用默认密码 admin123 */
+  passwordIsDefault?: boolean
   message?: string
 }
 
@@ -242,12 +252,13 @@ export interface RptyBridge {
   /** 进自己的桌面（node），或传 null 回到设备列表 */
   activateNode(node: string | null): Promise<void>
 
-  /** 邀请某个客户端进私密通话（对方同意才建房间） */
-  invite(clientId: string): Promise<void>
-  acceptInvite(): Promise<void>
-  declineInvite(): Promise<void>
+  /** 输密码直接配对：对了立刻建房，没有「对方同意」这一步 */
+  joinRoom(clientId: string, password: string): Promise<JoinResult>
   /** 主动离开房间：两个人一起回列表 */
   leaveRoom(): Promise<void>
+  /** 读 / 改自己的通话密码（别人连进来要过的门） */
+  getPasswordInfo(): Promise<PasswordInfo>
+  setPassword(password: string): Promise<JoinResult>
 
   create(options: SessionCreateOptions): Promise<SessionCreateResult>
   write(leafId: string, data: string): void
@@ -271,9 +282,9 @@ export interface RptyBridge {
   onResized(handler: (payload: SessionResizedPayload) => void): () => void
   onStatus(handler: (payload: RelayStatus) => void): () => void
   /** 房间关了：回列表并说明是对方离开还是超时 */
-  onRoomClosed(handler: (payload: { reason: string; peerName: string }) => void): () => void
-  /** 收到通话邀请：弹窗由用户决定 */
-  onInvited(handler: (invite: InviteView) => void): () => void
+  onRoomClosed(
+    handler: (payload: { reason: string; peerName: string; byMe?: boolean }) => void
+  ): () => void
   onError(handler: (payload: RelayErrorPayload) => void): () => void
   /** 主进程的一句提示：渲染层用 Toast 显示，不打断操作 */
   onNotice(handler: (text: string) => void): () => void

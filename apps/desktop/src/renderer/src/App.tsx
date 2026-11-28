@@ -14,9 +14,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
+  ClientInfo,
   ConfigInfo,
-  InviteView,
   MenuCommand,
+  PasswordInfo,
   RelayStatus,
   SessionAdoptedPayload
 } from '../../shared/ipc'
@@ -28,6 +29,20 @@ import { DevicesScreen } from './screens/devices'
 import { deviceLabel } from './lib/device-label'
 
 const MAX_SESSIONS = 20
+
+/**
+ * 配对失败的这些错误码属于「这次输密码」而不是「应用出错了」：
+ * 就地显示在密码框里，不往右上角的全局错误条上写。
+ */
+const JOIN_ERROR_CODES = new Set([
+  'bad_password',
+  'peer_busy',
+  'busy',
+  'offline',
+  'no_password',
+  'password_short',
+  'empty'
+])
 
 /**
  * 标签元数据的本地存储。
@@ -98,12 +113,19 @@ export default function App(): React.JSX.Element {
   const [error, setError] = useState('')
   /** 手动断开过：连接页要显示「已断开 + 重新连接」，而不是首次配置的样子 */
   const [detached, setDetached] = useState(false)
+  /** 密码框当前对着谁：错误回调里要用最新值，避免闭包拿到旧的 */
+  const joinTargetRef = useRef<ClientInfo | null>(null)
   /** 进了自己的桌面：node id；null = 停在列表 */
   const [privateNode, setPrivateNode] = useState<string | null>(null)
-  /** 我邀请出去、还没被答复的客户端 id：界面上显示「等待对方同意」 */
-  const [pendingInvite, setPendingInvite] = useState('')
-  /** 收到的邀请：弹窗里给用户决定 */
-  const [invite, setInvite] = useState<InviteView | null>(null)
+  /** 正在输密码要连的那个客户端；null = 没开密码框 */
+  const [joinTarget, setJoinTarget] = useState<ClientInfo | null>(null)
+  /** 密码框里原地显示的失败原因（密码错、对方忙…） */
+  const [joinError, setJoinError] = useState('')
+  const [joinBusy, setJoinBusy] = useState(false)
+  /** 「我的密码」设置弹窗 */
+  const [passwordOpen, setPasswordOpen] = useState(false)
+  /** 配对请求的超时计时：relay 不回话时也得把「连接中…」收掉，不能一直转 */
+  const joinTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const room = status.room ?? null
   const online = status.phase === 'online'
@@ -209,14 +231,13 @@ export default function App(): React.JSX.Element {
     const offStatus = window.rpty.onStatus((next) => {
       setStatus(next)
       if (next.phase === 'online') setBusy(false)
-      // 邀请状态以主进程为准：对方撤回、过期、房间已开，都在这里对齐。
-      setInvite((current) => {
-        const list = next.invites ?? []
-        if (list.length === 0) return null
-        if (current && list.some((item) => item.client === current.client)) return current
-        return list[0]
-      })
-      if (next.room) setPendingInvite('')
+      // 房间开了 = 密码对了：密码框可以收了。
+      if (next.room) {
+        if (joinTimerRef.current) clearTimeout(joinTimerRef.current)
+        setJoinTarget(null)
+        setJoinError('')
+        setJoinBusy(false)
+      }
     })
 
     const offState = window.rpty.onState(({ leafId, state }) => {
@@ -285,17 +306,20 @@ export default function App(): React.JSX.Element {
     })
 
     const offError = window.rpty.onError(({ code, message }) => {
-      setError(message ? `${message}（${code}）` : code)
-      // 邀请被拒 / 过期：把「等待对方同意」的提示收掉，别一直挂着。
-      if (code === 'declined' || code === 'expired' || code === 'peer_busy') {
-        setPendingInvite('')
+      // 配对失败是"这次尝试"的事：显示在密码框里，不往全局横幅上写。
+      if (JOIN_ERROR_CODES.has(code) || joinTargetRef.current) {
+        if (joinTimerRef.current) clearTimeout(joinTimerRef.current)
+        setJoinBusy(false)
+        setJoinError(message || `配对失败（${code}）`)
+        return
       }
+      setError(message ? `${message}（${code}）` : code)
     })
 
     const offReadOnly = window.rpty.onReadOnly((value) => setReadOnly(value))
 
     // 房间关了：两个人一起回列表。这里只负责清屏和说明原因。
-    const offRoomClosed = window.rpty.onRoomClosed(({ reason, peerName }) => {
+    const offRoomClosed = window.rpty.onRoomClosed(({ reason, peerName, byMe }) => {
       setSessions([])
       setActiveId(null)
       setPrivateNode(null)
@@ -305,14 +329,12 @@ export default function App(): React.JSX.Element {
           ? peerName
             ? `${peerName} 掉线超过 30 秒，通话已结束`
             : '对方掉线超过 30 秒，通话已结束'
-          : peerName
-            ? `${peerName} 离开了通话`
-            : '通话已结束'
+          : byMe
+            ? '你已离开通话'
+            : peerName
+              ? `${peerName} 离开了通话`
+              : '通话已结束'
       )
-    })
-
-    const offInvited = window.rpty.onInvited((payload) => {
-      setInvite(payload)
     })
 
     return () => {
@@ -326,7 +348,6 @@ export default function App(): React.JSX.Element {
       offError()
       offReadOnly()
       offRoomClosed()
-      offInvited()
     }
   }, [])
 
@@ -345,7 +366,7 @@ export default function App(): React.JSX.Element {
         privateNodeRef.current = null
         setSessions([])
         setActiveId(null)
-        setInvite(null)
+        setJoinTarget(null)
         void window.rpty.getConfigInfo().then(setConfig)
       }
     } catch (err) {
@@ -372,8 +393,8 @@ export default function App(): React.JSX.Element {
       setStatus({ phase: 'idle', agentOnline: false })
       setPrivateNode(null)
       privateNodeRef.current = null
-      setInvite(null)
-      setPendingInvite('')
+      setJoinTarget(null)
+      setJoinError('')
       setDetached(true)
     }
   }, [])
@@ -526,22 +547,45 @@ export default function App(): React.JSX.Element {
     setError('')
   }, [])
 
-  /** 邀请某个客户端通话：双向同意才建房间，对方不同意就什么也不会发生。 */
-  const inviteClient = useCallback(async (clientId: string) => {
-    if (!clientId) return
+  /** 点卡片：先要密码，输了再连 —— 不再有「对方同意」这一步。 */
+  const openJoin = useCallback((item: ClientInfo) => {
     setError('')
-    setPendingInvite(clientId)
-    await window.rpty.invite(clientId)
+    setJoinError('')
+    setJoinBusy(false)
+    setJoinTarget(item)
+    joinTargetRef.current = item
   }, [])
 
-  const acceptInvite = useCallback(async () => {
-    setInvite(null)
-    await window.rpty.acceptInvite()
+  const closeJoin = useCallback(() => {
+    if (joinTimerRef.current) clearTimeout(joinTimerRef.current)
+    joinTargetRef.current = null
+    setJoinTarget(null)
+    setJoinError('')
+    setJoinBusy(false)
   }, [])
 
-  const declineInvite = useCallback(async () => {
-    setInvite(null)
-    await window.rpty.declineInvite()
+  /** 提交密码：主进程发 ROOM_JOIN，结果由 relay 回（房间开 / 报错）。 */
+  const submitJoin = useCallback(async (password: string) => {
+    const target = joinTarget
+    if (!target) return
+    setJoinBusy(true)
+    setJoinError('')
+    if (joinTimerRef.current) clearTimeout(joinTimerRef.current)
+    // 8 秒没有回音：旧 relay 会把 ROOM_JOIN 当成未知信令，界面就会一直停在「连接中…」。
+    joinTimerRef.current = setTimeout(() => {
+      setJoinBusy(false)
+      setJoinError('中继没有响应，可能服务端版本不匹配，稍后再试')
+    }, 8000)
+    const result = await window.rpty.joinRoom(target.client, password)
+    if (!result.ok) {
+      if (joinTimerRef.current) clearTimeout(joinTimerRef.current)
+      setJoinBusy(false)
+      setJoinError(result.message ?? '连不上')
+    }
+  }, [joinTarget])
+
+  const openPasswordSettings = useCallback(() => {
+    setPasswordOpen(true)
   }, [])
 
   /** 主动离开房间：relay 会把另一端一起带回列表。 */
@@ -549,7 +593,8 @@ export default function App(): React.JSX.Element {
     await window.rpty.leaveRoom()
     setSessions([])
     setActiveId(null)
-    setPendingInvite('')
+    setJoinTarget(null)
+    setJoinError('')
   }, [])
 
   /**
@@ -564,8 +609,8 @@ export default function App(): React.JSX.Element {
     privateNodeRef.current = null
     setSessions([])
     setActiveId(null)
-    setInvite(null)
-    setPendingInvite('')
+    setJoinTarget(null)
+    setJoinError('')
     void window.rpty.snapshotSessions().then(applySnapshot)
   }, [roomId, applySnapshot])
 
@@ -692,19 +737,23 @@ export default function App(): React.JSX.Element {
           online={online}
           busy={busy}
           error={error}
-          pendingInvite={pendingInvite}
-          onInvite={(clientId) => void inviteClient(clientId)}
+          onJoin={openJoin}
+          onPasswordSettings={openPasswordSettings}
+          passwordIsDefault={status.passwordIsDefault}
           onExitRelay={() => void handleDisconnect()}
           onReload={() => void window.rpty.getStatus().then(setStatus)}
           // 入口常驻：没宿主也要能点一次，点了会明确告诉你「本机 agent 没起来」，
           // 而不是把一个按钮藏起来让用户猜自己的终端去哪了。
           onOpenMine={() => void openMine()}
         />
-        <InviteDialog
-          invite={invite}
-          onAccept={() => void acceptInvite()}
-          onDecline={() => void declineInvite()}
+        <JoinDialog
+          target={joinTarget}
+          busy={joinBusy}
+          error={joinError}
+          onSubmit={(password) => void submitJoin(password)}
+          onClose={closeJoin}
         />
+        {passwordOpen && <PasswordDialog onClose={() => setPasswordOpen(false)} />}
         <Toast text={notice} onClose={() => setNotice('')} />
       </>
     )
@@ -800,11 +849,6 @@ export default function App(): React.JSX.Element {
         <Toast text={notice} onClose={() => setNotice('')} />
       </main>
 
-      <InviteDialog
-        invite={invite}
-        onAccept={() => void acceptInvite()}
-        onDecline={() => void declineInvite()}
-      />
     </div>
   )
 }
@@ -819,36 +863,166 @@ function Toast({ text, onClose }: { text: string; onClose: () => void }): React.
   )
 }
 
-/** 收到邀请时的弹窗。房间里不弹（已经在通话中）。 */
-function InviteDialog({
-  invite,
-  onAccept,
-  onDecline
+/**
+ * 输密码配对。密码对了 relay 立刻建房 —— 对方不需要任何确认。
+ * 失败就地显示在这张框里，用户改一下就能重试，不用先关掉再点一次卡片。
+ */
+function JoinDialog({
+  target,
+  busy,
+  error,
+  onSubmit,
+  onClose
 }: {
-  invite: InviteView | null
-  onAccept: () => void
-  onDecline: () => void
+  target: ClientInfo | null
+  busy: boolean
+  error: string
+  onSubmit: (password: string) => void
+  onClose: () => void
 }): React.JSX.Element | null {
-  if (!invite) return null
+  const [password, setPassword] = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (!target) return
+    setPassword('')
+    // 打开就聚焦：用户点完卡片可以直接敲密码，不用再点一次输入框。
+    const timer = setTimeout(() => inputRef.current?.focus(), 30)
+    return () => clearTimeout(timer)
+  }, [target])
+
+  if (!target) return null
   return (
     <div className="modal" role="dialog" aria-modal="true">
-      <div className="modal__box">
-        <h2 className="modal__title">通话邀请</h2>
-        <p className="modal__body">
-          「{invite.name || invite.client.slice(0, 8)}」邀请你进入一对一私密通话。
-        </p>
-        <p className="modal__hint">
-          同意后你们两个人的终端会合到同一个工作区，只有你们两个人看得见。
-        </p>
+      <form
+        className="modal__box"
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (!busy && password) onSubmit(password)
+        }}
+      >
+        <h2 className="modal__title">进入「{target.name || target.client.slice(0, 8)}」</h2>
+        <p className="modal__body">输入对方的通话密码，直接进入一对一私密房间。</p>
+        <input
+          ref={inputRef}
+          className="modal__input"
+          type="password"
+          value={password}
+          autoComplete="off"
+          placeholder="通话密码"
+          onChange={(event) => setPassword(event.target.value)}
+          disabled={busy}
+        />
+        {error ? (
+          <p className="modal__error">{error}</p>
+        ) : (
+          <p className="modal__hint">
+            对方不用同意；连上后你们两个人的终端会合到同一个工作区，房间外看不到。
+          </p>
+        )}
         <div className="modal__actions">
-          <button type="button" className="btn" onClick={onDecline}>
-            拒绝
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>
+            取消
           </button>
-          <button type="button" className="btn btn--primary" onClick={onAccept}>
-            同意
+          <button type="submit" className="btn btn--primary" disabled={busy || !password}>
+            {busy ? '连接中…' : '进入'}
           </button>
         </div>
-      </div>
+      </form>
+    </div>
+  )
+}
+
+/**
+ * 「我的密码」：别人连进来要过的门。
+ *
+ * 改密码不要求旧密码 —— 能操作这个客户端就等于能改它，加一道"旧密码"只是
+ * 防不住真正拿着这台机器的人。但默认密码必须显性提示：否则等于把门虚掩着。
+ */
+function PasswordDialog({ onClose }: { onClose: () => void }): React.JSX.Element {
+  const [info, setInfo] = useState<PasswordInfo | null>(null)
+  const [next, setNext] = useState('')
+  const [confirm, setConfirm] = useState('')
+  const [error, setError] = useState('')
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    void window.rpty.getPasswordInfo().then((current) => {
+      setInfo(current)
+      // 已经改过密码的，输入框留空让人重新填；还在默认值的，把默认值填上方便直接改。
+      setNext(current.isDefault ? current.password : '')
+    })
+  }, [])
+
+  const submit = async (): Promise<void> => {
+    setError('')
+    if (next.trim().length < 6) {
+      setError('密码至少 6 位')
+      return
+    }
+    if (next.trim() !== confirm.trim()) {
+      setError('两次输入不一致')
+      return
+    }
+    const result = await window.rpty.setPassword(next.trim())
+    if (!result.ok) {
+      setError(result.message ?? '保存失败')
+      return
+    }
+    setSaved(true)
+    setInfo({ password: next.trim(), isDefault: next.trim() === 'admin123' })
+    onClose()
+  }
+
+  return (
+    <div className="modal" role="dialog" aria-modal="true">
+      <form
+        className="modal__box"
+        onSubmit={(event) => {
+          event.preventDefault()
+          void submit()
+        }}
+      >
+        <h2 className="modal__title">我的通话密码</h2>
+        {info && (
+          <p className="modal__body">
+            当前密码：<code className="modal__code">{info.password}</code>
+            {info.isDefault && <strong className="modal__warn"> · 还是默认的 admin123</strong>}
+          </p>
+        )}
+        <input
+          className="modal__input"
+          type="text"
+          value={next}
+          autoComplete="off"
+          placeholder="新密码（至少 6 位）"
+          onChange={(event) => setNext(event.target.value)}
+        />
+        <input
+          className="modal__input"
+          type="text"
+          value={confirm}
+          autoComplete="off"
+          placeholder="再输一次"
+          onChange={(event) => setConfirm(event.target.value)}
+        />
+        {error ? (
+          <p className="modal__error">{error}</p>
+        ) : (
+          <p className="modal__hint">
+            别人点你这张卡片时要输它。改完立刻生效，正在通话中的房间不受影响。
+          </p>
+        )}
+        <div className="modal__actions">
+          <button type="button" className="btn" onClick={onClose}>
+            关闭
+          </button>
+          <button type="submit" className="btn btn--primary" disabled={!next || !confirm}>
+            保存
+          </button>
+        </div>
+        {saved && <p className="modal__hint">已保存</p>}
+      </form>
     </div>
   )
 }

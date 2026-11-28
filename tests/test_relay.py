@@ -17,6 +17,7 @@ import os
 import sys
 import tempfile
 import unittest
+from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "server"))
 
@@ -127,7 +128,14 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         await self.feed(ws, {"type": "HELLO", "node_id": node, "name": name, "platform": "darwin"})
         return ws
 
-    async def client(self, cid: str, name: str = "", host: str = "", primary: bool = False) -> FakeWS:
+    async def client(
+        self,
+        cid: str,
+        name: str = "",
+        host: str = "",
+        primary: bool = False,
+        password: Optional[str] = "admin123",
+    ) -> FakeWS:
         query = f"?client={cid}&token={TOKEN}"
         if name:
             query += f"&name={name}"
@@ -137,6 +145,9 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
             query += "&primary=1"
         ws = self.spawn("/ctl" + query)
         await self.settle()
+        if password is not None:
+            # 真实客户端连上就上报自己的密码；password=None 用来模拟老客户端。
+            await self.feed(ws, {"type": "CTL_PASSWORD", "password": password})
         return ws
 
     async def create(self, ctl: FakeWS, sid: str = "s1", token: str = "t1", target: str = "n1") -> None:
@@ -229,10 +240,11 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.relay.sessions["s1"].owner, "c1")
         self.assertEqual(self.relay.sessions["s1"].node, "n1")
 
-    async def open_room(self, a: FakeWS, a_id: str, b: FakeWS, b_id: str) -> None:
-        """走一遍真实的双向握手：邀请 → 对方同意 → 建房。"""
-        await self.feed(a, {"type": "ROOM_INVITE", "to": b_id})
-        await self.feed(b, {"type": "ROOM_ACCEPT"})
+    async def open_room(
+        self, a: FakeWS, a_id: str, b: FakeWS, b_id: str, password: str = "admin123"
+    ) -> None:
+        """走一遍真实的配对：发起端输密码 → 直接建房（没有对方同意这一步）。"""
+        await self.feed(a, {"type": "ROOM_JOIN", "to": b_id, "password": password})
         await self.settle()
 
     async def test_create_inside_room_belongs_to_room(self) -> None:
@@ -546,31 +558,103 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         finally:
             relay.ROOM_GRACE_SECONDS = 30.0
 
-    async def test_invite_requires_consent_and_is_exclusive(self) -> None:
-        """邀请要对方同意；已经在通话里的人既不能被邀请，也不能去邀请。"""
+    async def test_password_correct_opens_room_without_consent(self) -> None:
+        """密码对就直接建房：对方不需要点任何东西，两个人都收到 ROOM_OPEN。"""
+        await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+
+        await self.open_room(a, "c1", b, "c2")
+
+        self.assertIsNotNone(a.last("ROOM_OPEN"))
+        self.assertIsNotNone(b.last("ROOM_OPEN"), "被连的那一端也应当直接进房间")
+        self.assertEqual(len(self.relay.rooms), 1)
+        room = next(iter(self.relay.rooms.values()))
+        self.assertEqual(sorted(room.members), ["c1", "c2"])
+
+    async def test_wrong_password_opens_nothing(self) -> None:
+        """密码错：只有发起端收到 bad_password，另一端什么都不知道、也没房间。"""
+        await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+
+        await self.feed(a, {"type": "ROOM_JOIN", "to": "c2", "password": "nope-nope"})
+
+        self.assertEqual(a.last("ERROR")["code"], "bad_password")
+        self.assertEqual(self.relay.rooms, {})
+        self.assertIsNone(b.last("ROOM_OPEN"))
+        self.assertIsNone(b.last("ROOM_JOINED"), "错误的尝试不该惊动对方")
+
+    async def test_join_is_exclusive_for_both_sides(self) -> None:
+        """已经在通话里的人：既不能被别人连，也不能去连别人。只说忙，不说跟谁。"""
         await self.agent("n1")
         a = await self.client("c1", host="n1")
         b = await self.client("c2", host="n1")
         c = await self.client("c3", host="n1")
-
-        # 没同意之前没有任何房间
-        await self.feed(a, {"type": "ROOM_INVITE", "to": "c2"})
-        self.assertEqual(self.relay.rooms, {})
-        self.assertEqual(b.last("ROOM_INVITE")["from"]["client"], "c1")
-
-        # 拒绝就不成立，且邀请方要知道被拒
-        await self.feed(b, {"type": "ROOM_DECLINE"})
-        self.assertEqual(self.relay.rooms, {})
-        self.assertEqual(a.last("ROOM_DECLINED")["by"], "c2")
-
-        # 建好房间后，第三方邀请其中一人：只说"忙"，不说跟谁
         await self.open_room(a, "c1", b, "c2")
-        await self.feed(c, {"type": "ROOM_INVITE", "to": "c1"})
-        self.assertEqual(c.last("ERROR")["code"], "peer_busy")
 
-        # 房间里的人再去邀请别人：自己先离开
-        await self.feed(a, {"type": "ROOM_INVITE", "to": "c3"})
+        await self.feed(c, {"type": "ROOM_JOIN", "to": "c1", "password": "admin123"})
+        self.assertEqual(c.last("ERROR")["code"], "peer_busy")
+        self.assertNotIn("c2", json.dumps(c.last("ERROR")), "忙的理由里不该出现对方是谁")
+
+        await self.feed(a, {"type": "ROOM_JOIN", "to": "c3", "password": "admin123"})
         self.assertEqual(a.last("ERROR")["code"], "busy")
+        self.assertEqual(len(self.relay.rooms), 1)
+
+    async def test_client_without_password_cannot_be_joined(self) -> None:
+        """老客户端没上报密码：谁也没法匹配进来，回 no_password。"""
+        await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        await self.client("c2", host="n1", password=None)
+
+        await self.feed(a, {"type": "ROOM_JOIN", "to": "c2", "password": "admin123"})
+        self.assertEqual(a.last("ERROR")["code"], "no_password")
+        self.assertEqual(self.relay.rooms, {})
+
+    async def test_password_is_hashed_and_default_is_flagged(self) -> None:
+        """relay 只存哈希；还在用 admin123 的客户端要被打上标记。"""
+        await self.agent("n1")
+        a = await self.client("c1", host="n1", password="admin123")
+        await self.client("c2", host="n1", password="s3cret-pw")
+
+        wire = "".join(m for m in a.sent if isinstance(m, str))
+        self.assertNotIn("admin123", wire, "密码明文不能出现在 relay 发给任何人的消息里")
+        self.assertNotIn("admin123", json.dumps(self.relay._save_state()))
+        self.assertTrue(self.relay.clients["c1"].pw_default)
+        self.assertFalse(self.relay.clients["c2"].pw_default)
+        rows = {row["client"]: row for row in self.relay.clients_summary()}
+        self.assertTrue(rows["c1"]["password_default"])
+        self.assertFalse(rows["c2"]["password_default"])
+        self.assertTrue(rows["c2"]["password"])
+
+    async def test_password_change_takes_effect_immediately(self) -> None:
+        """改完密码，旧密码立刻失效、新密码立刻可用。"""
+        await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.feed(b, {"type": "CTL_PASSWORD", "password": "new-pass-9"})
+        self.assertEqual(b.last("PASSWORD_SET")["default"], False)
+
+        await self.feed(a, {"type": "ROOM_JOIN", "to": "c2", "password": "admin123"})
+        self.assertEqual(a.last("ERROR")["code"], "bad_password")
+        await self.open_room(a, "c1", b, "c2", password="new-pass-9")
+        self.assertEqual(len(self.relay.rooms), 1)
+
+    async def test_short_password_rejected(self) -> None:
+        await self.agent("n1")
+        a = await self.client("c1", host="n1", password=None)
+        await self.feed(a, {"type": "CTL_PASSWORD", "password": "123"})
+        self.assertEqual(a.last("ERROR")["code"], "password_short")
+        self.assertFalse(self.relay.clients["c1"].pw_hash)
+
+    async def test_old_invite_signal_is_rejected(self) -> None:
+        """老客户端发邀请：不能悄悄退回旧行为，要明确让它升级。"""
+        await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        await self.client("c2", host="n1")
+        await self.feed(a, {"type": "ROOM_INVITE", "to": "c2"})
+        self.assertEqual(a.last("ERROR")["code"], "invite_removed")
+        self.assertEqual(self.relay.rooms, {})
 
     async def test_one_client_leaving_does_not_touch_another(self) -> None:
         await self.agent("n1")
@@ -761,17 +845,6 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
             "",
             "房间里的会话被认领成了私有终端 —— 这就是泄露",
         )
-
-    async def test_expired_invite_cannot_be_accepted(self) -> None:
-        """过期的邀请不能被同意：不能替十分钟前的自己决定。"""
-        await self.agent("n1")
-        a = await self.client("c1", host="n1")
-        b = await self.client("c2", host="n1")
-        await self.feed(a, {"type": "ROOM_INVITE", "to": "c2"})
-        self.relay.invites["c2"]["at"] -= relay.ROOM_INVITE_TTL + 5
-        await self.feed(b, {"type": "ROOM_ACCEPT"})
-        self.assertEqual(b.last("ERROR")["code"], "invite_expired")
-        self.assertEqual(self.relay.rooms, {})
 
     async def test_room_close_shuts_down_data_channel(self) -> None:
         """关房时数据面要一起收尾：viewer 被关掉，通道被摘掉。

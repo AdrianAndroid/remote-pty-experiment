@@ -48,9 +48,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
+import secrets
 import signal
 import sys
 import time
@@ -97,7 +99,11 @@ VIEWER_QUEUE_MAX = 512
 # 不做宽限的话，Wi-Fi 抖一下就把 vim 里没保存的东西一起带走。
 ROOM_GRACE_SECONDS = 30.0
 # 邀请的有效期：过期的邀请不该还能被同意 —— 那等于可以替十分钟前的自己决定。
-ROOM_INVITE_TTL = 120.0
+# 通话密码：默认值故意写死在两边（客户端缺省、服务端只用来算"是不是还在用默认密码"）。
+# 服务端只存 PBKDF2 哈希，不存明文、不落盘。轮数取 120k：一次握手几毫秒，暴力试也没那么便宜。
+DEFAULT_PASSWORD = "admin123"
+PASSWORD_MIN = 6
+PASSWORD_ROUNDS = 120_000
 
 
 # ---------------------------------------------------------------- 状态模型
@@ -138,8 +144,13 @@ class Client:
     name: str = ""
     # 它认领的宿主 node id（本机 agent）；没认领就是空。
     host: str = ""
-    # 所在房间 id。空 = 不在房间里（待配对状态）。排他：一个人同时只能在一个房间。
+    # 所在房间 id。空 = 不在房间里（待匹配状态）。排他：一个人同时只能在一个房间。
     room: str = ""
+    # 通话密码的 PBKDF2 哈希（salt = client id）。空 = 这个客户端还没上报密码，
+    # 谁也匹配不进来。明文只在客户端自己的 userData 里，relay 不碰。
+    pw_hash: str = ""
+    # 还在用默认密码 admin123：UI 要显性提示，不然等于告诉别人"试 admin123 就能进"。
+    pw_default: bool = False
 
     @property
     def online(self) -> bool:
@@ -231,7 +242,7 @@ class Relay:
         # room_id -> Room。房间里的终端只有 members 看得见。
         self.rooms: Dict[str, Room] = {}
         # 待对方同意的邀请：被邀请的 client id -> {"from": 谁, "at": 什么时候}
-        self.invites: Dict[str, Dict[str, Any]] = {}
+        # 邀请那套已经删掉：配对靠密码，不再需要"待处理的邀请"这张表。
         # 宽限期计时器：room_id -> 定时任务，重连时要能取消。
         self._room_timers: Dict[str, Any] = {}
         self._room_seq = 0
@@ -633,8 +644,6 @@ class Relay:
                 room.sessions.add(session.id)
                 room.borrowed.add(session.id)
 
-        self.invites.pop(a, None)
-        self.invites.pop(b, None)
         self._save_state()
 
         for cid in (a, b):
@@ -659,7 +668,7 @@ class Relay:
         await self.broadcast_clients()
         return room
 
-    async def _close_room(self, room_id: str, reason: str) -> None:
+    async def _close_room(self, room_id: str, reason: str, by: str = "") -> None:
         """关房：通知双方、销毁房间内终端、两人一起回列表。"""
         room = self.rooms.pop(room_id, None)
         if room is None:
@@ -698,8 +707,10 @@ class Relay:
             client = self.clients.get(cid)
             if client is not None and client.room == room_id:
                 client.room = ""
+            # by = 谁主动离开的（超时是空）。发起离开的那一端要显示「你已离开通话」，
+            # 而不是第三人称的「通话已结束」。
             await self._send_to_client(
-                cid, {"type": "ROOM_CLOSED", "room": room_id, "reason": reason}
+                cid, {"type": "ROOM_CLOSED", "room": room_id, "reason": reason, "by": by}
             )
             # 还回去的终端要重新回到主人的列表里：不推这一下，他回桌面会看到它们消失。
             await self._push_session_lists(cid)
@@ -769,19 +780,40 @@ class Relay:
             await self.broadcast_clients()
             return
 
-    async def _handle_room_invite(self, ws: Any, client: Client, msg: Dict[str, Any]) -> None:
+    async def _handle_ctl_password(self, ws: Any, client: Client, msg: Dict[str, Any]) -> None:
+        """客户端上报自己的通话密码。只存哈希，明文不出本机。
+
+        密码是"别人进来要过的门"，不是本机登录：所以改密码不需要旧密码，
+        能操作这个客户端就等于能改它。
+        """
+        raw = str(msg.get("password") or "")
+        if len(raw) < PASSWORD_MIN:
+            await self._error(ws, "password_short", f"密码至少 {PASSWORD_MIN} 位")
+            return
+        client.pw_hash = self._pw_hash(client.id, raw)
+        client.pw_default = raw == DEFAULT_PASSWORD
+        await self.send_json(ws, {"type": "PASSWORD_SET", "default": client.pw_default})
+        # 列表上的「默认密码」标记要跟着变
+        await self.broadcast_clients()
+
+    async def _handle_room_join(self, ws: Any, client: Client, msg: Dict[str, Any]) -> None:
+        """密码对了就建房 —— 中间不再有"对方同意"这一步。
+
+        对方不需要在场操作，但**必须在线**：房间是两条活连接之间的耦合，
+        给一个已经下线的人建房没有意义。
+        """
         target = str(msg.get("to") or "").strip()
+        raw = str(msg.get("password") or "")
         if not client.id:
-            await self._error(ws, "need_client", "邀请需要客户端身份")
+            await self._error(ws, "need_client", "连接需要客户端身份")
             return
         if not target:
-            await self._error(ws, "no_target", "没说要邀请谁")
+            await self._error(ws, "no_target", "没说要连谁")
             return
         if target == client.id:
-            await self._error(ws, "self", "不能和自己配对")
+            await self._error(ws, "self", "不能连自己")
             return
-        mine = self._client_room(client.id)
-        if mine is not None:
+        if self._client_room(client.id) is not None:
             await self._error(ws, "busy", "你已经在通话中，先离开再说")
             return
         peer = self.clients.get(target)
@@ -789,44 +821,24 @@ class Relay:
             await self._error(ws, "offline", "对方不在线")
             return
         if peer.room:
-            # 不告诉邀请者"对方跟谁在一起"，只说忙。
+            # 不告诉发起者"对方跟谁在一起"，只说忙。
             await self._error(ws, "peer_busy", "对方正在私密会话中")
             return
+        if not peer.pw_hash:
+            await self._error(ws, "no_password", "对方还没上报密码（对方客户端版本太旧）")
+            return
+        if not secrets.compare_digest(self._pw_hash(target, raw), peer.pw_hash):
+            LOG.info("密码不匹配：%s -> %s", client.id[:8], target[:8])
+            await self._error(ws, "bad_password", "密码不对")
+            return
+        await self._open_room(client.id, target)
 
-        self.invites[target] = {"from": client.id, "at": time.time()}
-        await self._send_to_client(
-            target,
-            {
-                "type": "ROOM_INVITE",
-                "from": {"client": client.id, "name": client.name, "host": client.host},
-            },
-        )
-        await self.send_json(ws, {"type": "ROOM_INVITED", "to": target})
-        LOG.info("客户端 %s 邀请 %s", client.id[:8], target[:8])
-
-    async def _handle_room_answer(self, ws: Any, client: Client, accept: bool) -> None:
-        invite = self.invites.pop(client.id, None)
-        if not invite:
-            await self._error(ws, "no_invite", "没有待处理的邀请")
-            return
-        if time.time() - float(invite.get("at") or 0) > ROOM_INVITE_TTL:
-            await self._send_to_client(
-                str(invite.get("from") or ""), {"type": "ROOM_EXPIRED", "by": client.id}
-            )
-            await self._error(ws, "invite_expired", "邀请已过期，让对方重新发起")
-            return
-        other = str(invite.get("from") or "")
-        peer = self.clients.get(other)
-        if not accept:
-            await self._send_to_client(other, {"type": "ROOM_DECLINED", "by": client.id})
-            return
-        if client.room:
-            await self._error(ws, "busy", "你已经在通话中")
-            return
-        if peer is None or not peer.online or peer.room:
-            await self._error(ws, "peer_gone", "对方已经不在线或已进入别的通话")
-            return
-        await self._open_room(client.id, other)
+    @staticmethod
+    def _pw_hash(client_id: str, password: str) -> str:
+        """PBKDF2-SHA256，salt 用 client id（固定，不需要另存）。"""
+        return hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), client_id.encode("utf-8"), PASSWORD_ROUNDS
+        ).hex()
 
     async def _error(self, ws: Any, code: str, message: str) -> None:
         await self.send_json(ws, {"type": "ERROR", "code": code, "message": message})
@@ -945,6 +957,11 @@ class Relay:
                     # 在通话中但一方掉线、正在等重连：列表上要写成「通话中 · 重连中」，
                     # 否则第三方会站在那儿白等一个已经不在的人。
                     "reconnecting": bool(room is not None and room.state == "half"),
+                    # 有没有上报密码（没有就是老客户端，点也进不去）；
+                    # 以及是否还在用默认弱口令 —— 这两条只描述"能不能进"和"该不该提醒"，
+                    # 不泄露密码本身。
+                    "password": bool(client.pw_hash),
+                    "password_default": bool(client.pw_default),
                     "sessions": sum(
                         1
                         for sid, session in self.sessions.items()
@@ -1218,12 +1235,12 @@ class Relay:
                 await self.broadcast_clients()
             return
 
-        if msg_type == "ROOM_INVITE":
-            await self._handle_room_invite(ws, client, msg)
+        if msg_type == "CTL_PASSWORD":
+            await self._handle_ctl_password(ws, client, msg)
             return
 
-        if msg_type in ("ROOM_ACCEPT", "ROOM_DECLINE"):
-            await self._handle_room_answer(ws, client, msg_type == "ROOM_ACCEPT")
+        if msg_type == "ROOM_JOIN":
+            await self._handle_room_join(ws, client, msg)
             return
 
         if msg_type == "ROOM_LEAVE":
@@ -1231,7 +1248,7 @@ class Relay:
             if room is None:
                 await self._error(ws, "no_room", "你不在通话中")
                 return
-            await self._close_room(room.id, "left")
+            await self._close_room(room.id, "left", by=client.id)
             return
 
         if msg_type in ("CTL_PAIR", "CTL_UNPAIR"):
@@ -1240,7 +1257,16 @@ class Relay:
             await self._error(
                 ws,
                 "pair_removed",
-                "配对已改成双向邀请（ROOM_INVITE / ROOM_ACCEPT），请升级客户端",
+                "配对已改成密码匹配（ROOM_JOIN + password），请升级客户端",
+            )
+            return
+
+        if msg_type in ("ROOM_INVITE", "ROOM_ACCEPT", "ROOM_DECLINE"):
+            # 邀请/同意那一步已经删了：现在点进去输密码直接建房。
+            await self._error(
+                ws,
+                "invite_removed",
+                "配对已改成密码匹配（点设备后输密码），请升级客户端",
             )
             return
 
@@ -1404,13 +1430,6 @@ class Relay:
         gone = client.id
         room = self._client_room(gone) if gone else None
         self.clients.pop(client.id, None)
-        # 它发出的、发给它的邀请，一起作废
-        if gone:
-            self.invites.pop(gone, None)
-            for target, invite in list(self.invites.items()):
-                if str(invite.get("from") or "") == gone:
-                    self.invites.pop(target, None)
-
         LOG.info("ctl 下线 %s（剩 %d 条连接）", ws.remote_address, len(self.by_ws))
         # 在线列表就是"此刻连着 wss 的客户端"，走了立刻从列表里消失
         await self.broadcast_clients()

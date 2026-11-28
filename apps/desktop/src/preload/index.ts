@@ -29,10 +29,11 @@ const bridge: RptyBridge = {
   getStatus: () => ipcRenderer.invoke(IpcChannel.RelayStatus),
   activateNode: (node: string | null) =>
     ipcRenderer.invoke(IpcChannel.NodeActivate, { node }),
-  invite: (clientId: string) => ipcRenderer.invoke(IpcChannel.RoomInvite, clientId),
-  acceptInvite: () => ipcRenderer.invoke(IpcChannel.RoomAccept),
-  declineInvite: () => ipcRenderer.invoke(IpcChannel.RoomDecline),
+  joinRoom: (clientId: string, password: string) =>
+    ipcRenderer.invoke(IpcChannel.RoomJoin, { clientId, password }),
   leaveRoom: () => ipcRenderer.invoke(IpcChannel.RoomLeave),
+  getPasswordInfo: () => ipcRenderer.invoke(IpcChannel.PasswordInfo),
+  setPassword: (password: string) => ipcRenderer.invoke(IpcChannel.PasswordSet, password),
   getConfigInfo: (): Promise<ConfigInfo> => ipcRenderer.invoke(IpcChannel.ConfigInfo),
 
   create: (options: SessionCreateOptions): Promise<SessionCreateResult> =>
@@ -59,7 +60,6 @@ const bridge: RptyBridge = {
   onRemoved: subscribe(IpcChannel.SessionRemoved),
   onResized: subscribe(IpcChannel.SessionResized),
   onRoomClosed: subscribe(IpcChannel.RelayRoomClosed),
-  onInvited: subscribe(IpcChannel.RelayInvited),
   onStatus: subscribe<RelayStatus>(IpcChannel.RelayStatusChanged),
   onError: subscribe(IpcChannel.RelayError),
   // 主进程说一句就走（比如"已新建客户端"），渲染层拿 Toast 显示，不弹模态框。

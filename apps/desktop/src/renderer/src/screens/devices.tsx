@@ -6,7 +6,10 @@
  * 谁连着 WSS 谁就在列表里，断开立刻消失，所以这一屏永远是"现在谁在线"。
  *
  * 自己那条标「我」、排第一、不可点 —— 自己的终端在本地就能开，不需要从自己这儿连回去。
- * 进别人的客户端才是真正的连接：那条数据通道连到对方认领的宿主上。
+ *
+ * 点别人 = 输对方的通话密码：密码对了两个人立刻进同一个私密房间，
+ * 不需要对方点「同意」。正在通话里的客户端留一条「通话中」标签、点不动，
+ * 但不写跟谁在通话 —— 小黑屋不该在墙上挂牌子。
  */
 
 import type { ClientInfo } from '../../../shared/ipc'
@@ -19,10 +22,12 @@ interface DevicesScreenProps {
   online: boolean
   busy: boolean
   error: string
-  /** 邀请某个客户端通话（双向同意才建房间） */
-  onInvite: (clientId: string) => void
-  /** 已经发出、还没被答复的邀请 */
-  pendingInvite?: string
+  /** 点一个客户端：弹出密码输入框 */
+  onJoin: (item: ClientInfo) => void
+  /** 打开「我的通话密码」设置 */
+  onPasswordSettings: () => void
+  /** 自己还在用默认密码 admin123 */
+  passwordIsDefault?: boolean
   onExitRelay: () => void
   onReload: () => void
   /** 回到自己的终端（「我」那条不给点，但总得有条路回去） */
@@ -35,8 +40,9 @@ export function DevicesScreen({
   online,
   busy,
   error,
-  pendingInvite = '',
-  onInvite,
+  onJoin,
+  onPasswordSettings,
+  passwordIsDefault = false,
   onExitRelay,
   onReload,
   onOpenMine
@@ -71,6 +77,18 @@ export function DevicesScreen({
               我的终端
             </button>
           )}
+          <button
+            type="button"
+            className={passwordIsDefault ? 'devices__ghost devices__ghost--warn' : 'devices__ghost'}
+            onClick={onPasswordSettings}
+            title={
+              passwordIsDefault
+                ? '你还在用默认密码 admin123 —— 知道地址的人试一次就能进你的桌面，点这里改掉'
+                : '修改我的通话密码（别人连进来要输它）'
+            }
+          >
+            我的密码{passwordIsDefault ? ' · 默认' : ''}
+          </button>
           <button type="button" className="devices__ghost" onClick={onReload} title="重新拉一次在线列表">
             刷新
           </button>
@@ -83,8 +101,9 @@ export function DevicesScreen({
       <div className="devices__body">
         <h1>在线客户端</h1>
         <p className="devices__hint">
-          点一个客户端就是发起通话邀请，对方同意后你们进入一对一的私密房间：
-          两边的终端合到一处，房间外的人看不到。离开只是离开房间，宿主上的进程不杀。
+          点一个客户端，输入它的通话密码，两个人就直接进入一对一的私密房间 ——
+          不需要对方点同意。房间里的终端只有你们两个人看得见；离开只是离开房间，
+          宿主上的进程不杀。
         </p>
 
         {error && <p className="devices__error">{error}</p>}
@@ -102,9 +121,7 @@ export function DevicesScreen({
               const isSelf = !!selfClientId && item.client === selfClientId
               // 在通话里的人点不动：不是灰掉"没上线"，是灰掉"正在私密会话"。
               const inCall = !!item.busy
-              const waiting = pendingInvite === item.client
-              const invitable = !isSelf && !!item.host && online && !busy && !inCall && !waiting
-              const sessions = item.sessions ?? 0
+              const joinable = !isSelf && !!item.host && online && !busy && !inCall
               return (
                 <li key={item.client}>
                   <button
@@ -112,22 +129,20 @@ export function DevicesScreen({
                     className={
                       isSelf
                         ? 'devicecard devicecard--self'
-                        : invitable
+                        : joinable
                           ? 'devicecard'
                           : 'devicecard devicecard--off'
                     }
-                    disabled={!invitable}
-                    onClick={() => onInvite(item.client)}
+                    disabled={!joinable}
+                    onClick={() => onJoin(item)}
                     title={
                       isSelf
                         ? '这是你自己。回自己的终端请点右上角「我的终端」'
                         : inCall
                           ? '对方正在私密通话中，等他结束再来'
-                          : waiting
-                            ? '邀请已发出，等对方同意'
-                            : !item.host
-                              ? '这个客户端还没认领宿主（它那台机器上的 agent 没起来）'
-                              : `邀请 ${item.name} 一对一通话`
+                          : !item.host
+                            ? '这个客户端还没认领宿主（它那台机器上的 agent 没起来）'
+                            : `输入 ${item.name} 的通话密码，直接一对一`
                     }
                   >
                     <span
@@ -142,9 +157,12 @@ export function DevicesScreen({
                             {item.reconnecting ? '通话中 · 重连中' : '通话中'}
                           </em>
                         )}
+                        {!isSelf && !inCall && item.password_default && (
+                          <em className="devicecard__badge devicecard__badge--warn">默认密码</em>
+                        )}
                       </span>
                       <span className="devicecard__meta">
-                        {item.host ? `${sessions} 个终端` : '宿主未上线'}
+                        {item.host ? `${item.sessions ?? 0} 个终端` : '宿主未上线'}
                         {item.host && item.host_name
                           ? ` · ${item.host_name.replace(/\.local$/, '')}`
                           : ''}
@@ -152,7 +170,7 @@ export function DevicesScreen({
                     </span>
                     {!isSelf && (
                       <span className="devicecard__go">
-                        {waiting ? '等待同意…' : inCall ? '通话中' : invitable ? '邀请通话 →' : ''}
+                        {inCall ? '通话中' : joinable ? '输密码 →' : ''}
                       </span>
                     )}
                   </button>

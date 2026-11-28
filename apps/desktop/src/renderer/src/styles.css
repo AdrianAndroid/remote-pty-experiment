@@ -1108,7 +1108,7 @@ code {
   color: #ffc45c;
 }
 
-/* 邀请弹窗：一对一房间的「门」，只有同意才进得去 */
+/* 「在输密码配对」的框：一对一房间的门。密码对就进，没有确认环节 */
 .modal {
   position: fixed;
   inset: 0;
@@ -1154,4 +1154,54 @@ code {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+
+/* 密码输入：单行、等宽、暗底，输错时下面直接换一行红字 */
+.modal__input {
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(120, 140, 200, 0.28);
+  background: #10121a;
+  color: #eef1f7;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+}
+
+.modal__input:focus {
+  outline: none;
+  border-color: rgba(154, 208, 255, 0.55);
+}
+
+.modal__error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #ff8f8f;
+}
+
+.modal__code {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: rgba(154, 208, 255, 0.12);
+  color: #9ad0ff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.modal__warn {
+  color: #ffc45c;
+}
+
+/* 还在用默认密码：这条入口要显眼，不然等于把门虚掩着没人管 */
+.devices__ghost--warn {
+  color: #ffc45c;
+  border-color: rgba(255, 196, 92, 0.4);
+}
+
+/* 别人的卡片上标「默认密码」：一眼看出这台试 admin123 就能进 */
+.devicecard__badge--warn {
+  background: rgba(255, 196, 92, 0.14);
+  color: #ffc45c;
 }
