@@ -6,7 +6,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { BrowserWindow, Menu, app, ipcMain, shell } from 'electron'
 import type { MenuCommand, RelayConfig } from '../shared/ipc'
@@ -372,10 +372,16 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
-  // 开发时跑的是 electron 本体，Dock 里会是 Electron 的默认图标；
-  // 显式换成本项目的图标，打包后则由 build/icon.icns 接管。
-  if (process.platform === 'darwin' && app.dock) {
-    app.dock.setIcon(join(__dirname, '../../build/icon.png'))
+  // 开发时跑的是 electron 本体，Dock 里会是 Electron 的默认图标；打包后 .app 用 build/icon.icns，
+  // 而 build/ 并不在打包清单里（files 只有 out/**），这里再去 setIcon 会抛错——它排在
+  // createWindow 之前，一抛整个启动流程就断了，装好的 App 连窗口都不出。
+  if (!app.isPackaged && process.platform === 'darwin' && app.dock) {
+    const iconPath = join(__dirname, '../../build/icon.png')
+    try {
+      if (existsSync(iconPath)) app.dock.setIcon(iconPath)
+    } catch {
+      // 图标只是装饰，失败不该拦住启动。
+    }
   }
   registerIpc()
   buildMenu()
