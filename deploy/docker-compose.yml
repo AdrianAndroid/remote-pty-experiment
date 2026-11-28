@@ -1,7 +1,7 @@
 services:
   relay:
     build: .
-    image: rpty-relay:1.0.0
+    image: rpty-relay:1.1.0
     container_name: rpty-relay
     restart: always
     # host 网络让 127.0.0.1:8765 直接落在宿主机回环上，
