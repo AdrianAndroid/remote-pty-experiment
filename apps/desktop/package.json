@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "pnpm run test:profile",
     "test:profile": "tsc src/main/profile.ts --outDir .tmp/profile-test --module es2020 --target es2020 --moduleResolution bundler --skipLibCheck && mv .tmp/profile-test/profile.js .tmp/profile-test/profile.mjs && node test/profile.test.mjs",
-    "pack:mac": "electron-vite build && electron-builder --mac dir"
+    "pack:mac": "electron-vite build && electron-builder --mac dir",
+    "pack:linux": "electron-vite build && electron-builder --linux deb"
   },
   "build": {
     "appId": "xin.zhaojian.rpty",
@@ -39,6 +40,35 @@
         }
       ],
       "icon": "build/icon.icns"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Development",
+      "maintainer": "zhaojian <zhaojian@users.noreply.github.com>",
+      "synopsis": "rpty 远端终端客户端",
+      "description": "把远端主机上的 PTY 当成自己的窗口：一对一私密房间、通话密码、多窗口。",
+      "icon": "build/icon.png"
+    },
+    "deb": {
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libdrm2",
+        "libgbm1",
+        "libxcb-dri3-0"
+      ]
     }
   },
   "dependencies": {
