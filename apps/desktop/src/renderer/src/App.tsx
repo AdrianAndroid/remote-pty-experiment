@@ -112,7 +112,6 @@ export default function App(): React.JSX.Element {
   statusRef.current = status
 
   const seqRef = useRef(0)
-  const autoCreatedRef = useRef(false)
   const readOnlyRef = useRef(false)
   const activeNodeRef = useRef<string | null>(null)
   /** 我认领的宿主 node id：只有它的标签才落盘 */
@@ -162,8 +161,6 @@ export default function App(): React.JSX.Element {
   /** 把主进程的会话快照合进标签列（按 leafId 去重，可以反复调）。 */
   const applySnapshot = useCallback((list: SessionAdoptedPayload[]) => {
     if (!Array.isArray(list) || list.length === 0) return
-    const view = activeClientRef.current ?? ''
-    autoCreatedRef.current = list.some((item) => !item.owner || !view || item.owner === view)
     // 上次这个设备留下的标题 / 顺序 / 选中，按 sessionId 对回去
     const saved =
       activeClientRef.current && activeClientRef.current === myClientIdRef.current
@@ -241,8 +238,6 @@ export default function App(): React.JSX.Element {
       ({ leafId, sessionId, owned, index, cols, rows, node, owner }) => {
         setSessions((prev) => {
           if (prev.some((item) => item.id === leafId)) return prev
-          const view = activeClientRef.current ?? ''
-          if (!owner || !view || owner === view) autoCreatedRef.current = true
           if (index > seqRef.current) seqRef.current = index
           // 同一个 PTY 上次摆在哪、叫什么，按 sessionId 找回来
           const saved = readTabStore()[owner || activeClientRef.current || '']?.items.find(
@@ -307,7 +302,6 @@ export default function App(): React.JSX.Element {
       setSessions([])
       setActiveId(null)
       setStatus({ phase: 'idle', agentOnline: false })
-      autoCreatedRef.current = false
       setActiveNode(null)
       setPeerClosed(true)
       setDetached(true)
@@ -356,7 +350,6 @@ export default function App(): React.JSX.Element {
    */
   const handleDisconnect = useCallback(async () => {
     setError('')
-    ownEnteredRef.current = false
     try {
       await window.rpty.disconnect()
     } catch (err) {
@@ -365,7 +358,6 @@ export default function App(): React.JSX.Element {
       setSessions([])
       setActiveId(null)
       setStatus({ phase: 'idle', agentOnline: false })
-      autoCreatedRef.current = false
       setActiveNode(null)
       setPeerClosed(false)
       setDetached(true)
@@ -508,28 +500,9 @@ export default function App(): React.JSX.Element {
     [visibleSessions]
   )
 
-  // 连上且被控端在线但没有终端时，自动开一个。
-  // 但要先给「镜像别人已有会话」一点时间：relay 一接上就会回 SESSION_LIST，
-  // 如果这里抢在前面 create，就会凭空多出一个自己的终端，同步就没了。
-  useEffect(() => {
-    if (!activeNode) return
-    if (autoCreatedRef.current) return
-    // 看的是「这台设备在不在线」，不是本机宿主在不在线
-    const device = (status.nodes ?? []).find((item) => item.node === activeNode)
-    if (status.phase !== 'online' || !device?.online) return
-    const timer = setTimeout(() => {
-      if (autoCreatedRef.current) return
-      const mine = sessionsRef.current.filter(
-        (item) => !item.owner || !viewClientId || item.owner === viewClientId
-      )
-      if (mine.length > 0) return
-      autoCreatedRef.current = true
-      // 必须指名设备：不传 target 主进程会拒绝（它不替你猜机器）
-      void createSession(activeNodeRef.current ?? undefined)
-    }, 700)
-    return () => clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status.phase, status.nodes, sessions.length, activeNode, viewClientId])
+  // 空桌面不自动建终端：进到一台没有终端的机器时显示空状态，等用户按 ⌘T。
+  // 以前这里 0.7 秒后自动 createSession，副作用是一个刚建的新客户端会未经询问
+  // 就在宿主上多 spawn 一个 shell —— 见 openspec/changes/start-at-device-list。
 
   // ---------------------------------------------------------- 菜单与快捷键
 
@@ -608,7 +581,6 @@ export default function App(): React.JSX.Element {
       setActiveClientId(clientId)
       setSessions([])
       setActiveId(null)
-      autoCreatedRef.current = false
       // 先落 ref 再 await：主进程会立刻按缓存 adopt 并推事件回来，
       // 那时 useState 还没生效，靠 ref 才知道这是哪台设备（否则标题/顺序对不上）。
       activeNodeRef.current = node
@@ -631,7 +603,6 @@ export default function App(): React.JSX.Element {
     setActiveClientId(null)
     setSessions([])
     setActiveId(null)
-    autoCreatedRef.current = false
     setError('')
   }, [])
 
@@ -648,18 +619,10 @@ export default function App(): React.JSX.Element {
    *
    * 配对是双向的：对方那边已经站在我的终端前面了，我这边还停在列表上就没意义。
    * 只在"新出现一个配对"时进一次，之后自己按「离开」回来不会被再拽进去。
+   *
+   * 注意这里只处理「对方显式配对」，不含「自己上线」：启动一律停在设备列表，
+   * 见 openspec/changes/start-at-device-list。
    */
-  /** 连上之后自动进自己的桌面，只进一次：之后按「离开」回列表不会再被拽进去 */
-  const ownEnteredRef = useRef(false)
-
-  useEffect(() => {
-    if (status.phase !== 'online' || activeNode || !ownHostNode || detached) return
-    if (ownEnteredRef.current) return
-    ownEnteredRef.current = true
-    // 自己的桌面：终端都归我，不需要配对
-    void enterDevice(ownHostNode, status.clientId ?? null)
-  }, [status.phase, activeNode, ownHostNode, status.clientId, detached, enterDevice])
-
   const autoEnterKeyRef = useRef('')
   useEffect(() => {
     if (status.phase !== 'online') return
@@ -718,7 +681,6 @@ export default function App(): React.JSX.Element {
           ownHostNode
             ? () => {
                 // 回自己的桌面：不带配对目标，main 侧也会跳过自配
-                ownEnteredRef.current = true
                 void enterDevice(ownHostNode, status.clientId ?? null)
               }
             : undefined
