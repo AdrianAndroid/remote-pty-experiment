@@ -6,7 +6,8 @@
 上限放在服务端才是真上限。
 
 ## 改了什么
-- `server/relay.py` 新增 `MAX_CLIENTS = 10`。
+- `server/relay.py` 新增 `MAX_CLIENTS = int(os.environ.get("RPty_MAX_CLIENTS", "10"))`，
+  生产用默认 10；测试场可以把 demo relay 调到 1 来验证拒绝路径。
 - `handle_ctl` 在登记连接**之前**数一次「当前还在线的客户端身份」：
   `sum(1 for c in clients.values() if c.conns)`；到 10 就回
   `ERROR{code:"server_full"}` 并按关闭码 `4010` 断开。
@@ -19,6 +20,10 @@
 - 新增 `test_client_cap_rejects_eleventh`：10 个客户端在场 → 第 11 个收
   `server_full` + 4010；同名 `c0` 重连不受影响。`pytest` 47 passed。
 - `flake8` 零告警，`pnpm typecheck` 通过。
+
+## 验证补记
+- demo relay 用 `RPty_MAX_CLIENTS=1` 起：第二个客户端连上时界面显示
+  「服务端已满：最多同时 10 个客户端，请稍后再试」，且不再自动重连。
 
 ## 边界
 - 只限制「客户端身份」，不限制单个客户端开几条连接（多窗口共用一份身份）。

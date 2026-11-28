@@ -30,5 +30,5 @@ curl -s https://relay.example.com/healthz
 
 ## 上限
 
-- `MAX_CLIENTS = 10`：同时最多 10 个客户端身份，第 11 个收 `server_full` 并按 4010 断开。
+- `MAX_CLIENTS`（默认 10，可用 `RPty_MAX_CLIENTS` 覆盖）：同时最多 10 个客户端身份，第 11 个收 `server_full` 并按 4010 断开。
 - `VIEWER_QUEUE_BYTES = 8MB`：单个观众在等快照期间攒够 8MB 就按 4009 断开，重连走快照。

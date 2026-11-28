@@ -98,7 +98,7 @@ MAX_MESSAGE = 8 * 1024 * 1024
 # 这台机器 2 vCPU / 1.6GiB：每个客户端都带一条常驻信令连接、若干个 viewer 队列，
 # 再加上每次列表广播的逐人裁剪，人数一多延迟就被拖起来。10 是留了余量的上限，
 # 超了直接拒绝 —— 比让所有人一起变慢更体面。
-MAX_CLIENTS = 10
+MAX_CLIENTS = int(os.environ.get("RPty_MAX_CLIENTS", "10"))
 # viewer 还没拿到快照时最多替它排队多少条增量，超了就丢（宁可少画一段也不能撑爆内存）。
 VIEWER_QUEUE_MAX = 512
 # 单个 viewer 在等快照期间最多替它攒多少字节。超了就断开它 ——
