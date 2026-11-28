@@ -65,3 +65,23 @@ kill -0 $! 2>/dev/null && wait $! || exec /opt/rpty/rpty-desktop --no-sandbox "$
 启动器按 `$DISPLAY` 判断是否已有实例：同一屏幕有实例就提窗口；实例在别的屏幕
 （一台机器可能同时有物理 `:0` 和 VNC `:1`）就关掉旧的在本次点击的屏幕重开。
 不这样判断的话，程序会“已经起来了但开在另一块屏幕上”，远程看就是双击没反应。
+
+## macOS 客户端（.app）
+
+```bash
+cd apps/desktop
+export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+pnpm build
+npx electron-builder --mac dir --x64   --config.mac.identity="Apple Development: Jian Zhao (93J95FB35Y)"
+ditto release/mac/rpty.app /Applications/rpty.app
+```
+
+几个要点：
+
+- `build.mac.target` 里写的 arch 是 `arm64`；在这台 Intel Mac 上必须显式 `--x64`，否则打出来的跑不了。
+- 签名身份用改机上的 **Apple Development** 证书（`security find-identity -v -p codesigning` 可查），
+  不要用自签名：默认 `identity: "-"` 会 ad-hoc 签，本机凑合，换机器就被 Gatekeeper 拦。
+- electron-builder 自动带 `codesign --options runtime`（hardened runtime），签名后自查：
+  `codesign --verify --strict --verbose=2 /Applications/rpty.app`。
+- 没有 notarize（缺 Developer ID + 公证凭据），所以 `spctl -a` 会报 `rejected`；
+  本机构建的包没有 quarantine 属性，照常双击运行。要发给别人就得 Developer ID + `notarytool`。
