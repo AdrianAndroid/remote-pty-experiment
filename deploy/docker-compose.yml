@@ -1,0 +1,27 @@
+services:
+  relay:
+    build: .
+    image: rpty-relay:1.0.0
+    container_name: rpty-relay
+    restart: always
+    # host 网络让 127.0.0.1:8765 直接落在宿主机回环上，
+    # 同机的 1Panel-openresty 无需任何额外配置即可反代。
+    network_mode: host
+    env_file:
+      - .env
+    environment:
+      RPty_HOST: 127.0.0.1
+      RPty_PORT: "8765"
+      RPty_LOG_LEVEL: INFO
+      RPty_STATE_FILE: /data/relay-state.json
+    # 归属与编号要跨容器重建活下来：不然每重建一次，所有终端就换一次主人。
+    volumes:
+      - ./data:/data
+      # relay.py 挂进来而不是烤进镜像：以后发版只需 scp + restart，
+      # 不必重建镜像（这台 1.6GiB 的机器重建一次要几分钟，还可能把别人踢下线）。
+      - ./relay.py:/app/relay.py:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
