@@ -61,3 +61,7 @@ kill -0 $! 2>/dev/null && wait $! || exec /opt/rpty/rpty-desktop --no-sandbox "$
 ```
 
 `Exec=/usr/local/bin/rpty-launch %U`；起不来先看 `~/.cache/rpty/launch.log`。
+
+启动器按 `$DISPLAY` 判断是否已有实例：同一屏幕有实例就提窗口；实例在别的屏幕
+（一台机器可能同时有物理 `:0` 和 VNC `:1`）就关掉旧的在本次点击的屏幕重开。
+不这样判断的话，程序会“已经起来了但开在另一块屏幕上”，远程看就是双击没反应。
