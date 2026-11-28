@@ -201,6 +201,8 @@ export class RelayClient {
   private resyncTimer: NodeJS.Timeout | null = null
   /** 节点离线后等多久算「宿主真的没了」。网络抖动不该把标签清掉。 */
   private static readonly NODE_GONE_MS = 30000
+  /** 与服务端 MAX_CLIENTS 保持一致，只用于提示文案。 */
+  private static readonly MAX_CLIENTS = 10
   private readonly nodeGoneTimers = new Map<string, NodeJS.Timeout>()
   /** 本端主动"撤掉画面"的镜像会话。PTY 还在宿主上，只是这边不想看了。 */
   private readonly detached = new Set<string>()
@@ -214,6 +216,8 @@ export class RelayClient {
   /** 各节点最近一次上报的会话列表。没进入设备也记着，点进去立刻能挂上。 */
   private readonly lastLists = new Map<string, unknown[]>()
   private manualClose = false
+  /** 服务端名额满了被拒（关闭码 4010）：不自动重连，等用户自己重试。 */
+  private ctlFull = false
   /**
    * 这个客户端自己的身份证。存储在 userData 里，重启不变 ——
    * 不靠它，客户端一重启就忘了哪些终端是自己开的，Tab 会整片变成「共享」。
@@ -341,6 +345,7 @@ export class RelayClient {
   // ------------------------------------------------------------ 连接
 
   async connect(config: RelayConfig): Promise<RelayStatus> {
+    this.ctlFull = false
     this.config = config
     this.manualClose = false
     this.clearReconnect()
@@ -603,10 +608,21 @@ export class RelayClient {
         }
       })
 
-      ws.on('close', () => {
+      ws.on('close', (code: number) => {
         clearTimeout(timer)
         if (this.ctl === ws) this.ctl = null
-        if (!settled) settle(new Error('relay 拒绝连接，请检查地址与 token'))
+        // 4010 = 服务端名额满了。这不是「网络抖动」：重连只会继续撞墙，
+        // 还会把窗口拖成一直「正在重连…」。
+        this.ctlFull = code === 4010
+        if (!settled) {
+          settle(
+            new Error(
+              this.ctlFull
+                ? `服务端已满：最多同时 ${RelayClient.MAX_CLIENTS} 个客户端，请稍后再试`
+                : 'relay 拒绝连接，请检查地址与 token',
+            ),
+          )
+        }
         this.onCtlClosed()
       })
 
@@ -619,6 +635,10 @@ export class RelayClient {
 
   private onCtlClosed(): void {
     if (this.manualClose) return
+    if (this.ctlFull) {
+      this.setStatus('offline', `服务端已满（最多 ${RelayClient.MAX_CLIENTS} 个客户端）`)
+      return
+    }
     this.setAgentOnline(false)
     for (const session of this.sessions.values()) {
       if (session.state === 'active') {

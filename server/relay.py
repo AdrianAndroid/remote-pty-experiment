@@ -93,6 +93,12 @@ LOG = logging.getLogger("relay")
 
 # 终端输出可能一次来很大（比如 cat 一个二进制文件），但不能无限。
 MAX_MESSAGE = 8 * 1024 * 1024
+# 一台 relay 最多同时服务多少个客户端身份。
+#
+# 这台机器 2 vCPU / 1.6GiB：每个客户端都带一条常驻信令连接、若干个 viewer 队列，
+# 再加上每次列表广播的逐人裁剪，人数一多延迟就被拖起来。10 是留了余量的上限，
+# 超了直接拒绝 —— 比让所有人一起变慢更体面。
+MAX_CLIENTS = 10
 # viewer 还没拿到快照时最多替它排队多少条增量，超了就丢（宁可少画一段也不能撑爆内存）。
 VIEWER_QUEUE_MAX = 512
 # 单个 viewer 在等快照期间最多替它攒多少字节。超了就断开它 ——
@@ -1175,6 +1181,24 @@ class Relay:
         client_id = ((query.get("client") or [""])[0] or "").strip()
         client_name = ((query.get("name") or [""])[0] or "").strip()
         host_hint = ((query.get("host") or [""])[0] or "").strip()
+
+        # 名额检查要在登记之前做：老客户端重连（同一个 client_id）不占新名额，
+        # 否则一次断线重连就可能被自己顶掉。
+        known = self.clients.get(client_id) if client_id else None
+        if known is None or not known.conns:
+            live = sum(1 for c in self.clients.values() if c.conns)
+            if live >= MAX_CLIENTS:
+                LOG.warning(
+                    "客户端连接数已达上限 %d，拒绝 %s", MAX_CLIENTS, ws.remote_address
+                )
+                await self._error(
+                    ws,
+                    "server_full",
+                    f"服务端已满：最多同时 {MAX_CLIENTS} 个客户端，请稍后再试",
+                )
+                await ws.close(code=4010, reason="full")
+                return
+
         client = self._ensure_client(ws, client_id, client_name, host_hint)
 
         # 谁是「无主会话」的主人：优先主窗口（默认数据目录，primary=1）。

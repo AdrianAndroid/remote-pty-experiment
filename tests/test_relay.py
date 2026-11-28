@@ -195,6 +195,22 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ws.closed[0], 4001)
         self.assertEqual(ws.events(), [])
 
+    async def test_client_cap_rejects_eleventh(self) -> None:
+        """最多 10 个客户端身份，第 11 个被拒；同名重连不受影响。"""
+        await self.agent("n1")
+        for i in range(relay.MAX_CLIENTS):
+            await self.client(f"c{i}")
+        self.assertEqual(len([c for c in self.relay.clients.values() if c.conns]), 10)
+
+        extra = self.spawn("/ctl?client=c-extra&token=" + TOKEN)
+        await self.settle()
+        self.assertEqual(extra.closed[0], 4010, "名额满了要按 4010 关掉")
+        self.assertEqual(extra.last("ERROR")["code"], "server_full")
+
+        # 已经在场的人重连（同一个 client_id）不该被自己的名额挡住。
+        again = await self.client("c0")
+        self.assertIsNone(again.closed)
+
     async def test_client_hello_carries_nodes(self) -> None:
         await self.agent("n1", "mini")
         ctl = await self.client("c1", "mini-aaaa", "n1")
