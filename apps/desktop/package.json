@@ -10,6 +10,8 @@
     "preview": "electron-vite preview",
     "start": "electron .",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "pnpm run test:profile",
+    "test:profile": "tsc src/main/profile.ts --outDir .tmp/profile-test --module es2020 --target es2020 --moduleResolution bundler --skipLibCheck && mv .tmp/profile-test/profile.js .tmp/profile-test/profile.mjs && node test/profile.test.mjs",
     "pack:mac": "electron-vite build && electron-builder --mac dir"
   },
   "build": {

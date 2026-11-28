@@ -94,6 +94,7 @@ import WebSocket from 'ws'
 import type {
   ClientInfo, NodeInfo, PairInfo, RelayConfig, RelayStatus } from '../shared/ipc'
 import type { SessionState } from '../shared/protocol'
+import { getProfile } from './profile'
 
 interface RemoteSession {
   leafId: string
@@ -468,7 +469,7 @@ export class RelayClient {
     const who = path.startsWith('/ctl')
       ? `&client=${encodeURIComponent(this.clientId)}&name=${encodeURIComponent(this.clientName)}${
           this.hostNode ? `&host=${encodeURIComponent(this.hostNode)}` : ''
-        }${process.env.RPTY_USERDATA ? '' : '&primary=1'}`
+        }${getProfile().isDefault ? '&primary=1' : ''}`
       : ''
     return `${base}${path}${sep}token=${encodeURIComponent(this.config?.token ?? '')}${who}`
   }
@@ -1202,24 +1203,28 @@ export class RelayClient {
 }
 
 /**
- * 客户端自己的名字：`<主机名短名>-<4 位 hex>`，生成一次写进 userData。
+ * 客户端自己的名字，生成一次写进 userData。
  *
- * 只要不卸载重装（不删数据目录），重启、换网、换 relay 都还是这个名字。
- * 同机多开两个客户端（不同 RPTY_USERDATA）各自生成，天然不撞。
+ * 默认 profile：`<主机名短名>-<4 位 hex>`（和以前一样，老用户的名字不变）。
+ * 其它 profile：`<主机名短名>-<profile 名>` —— 同机多开时设备列表里一眼分得清，
+ * 否则两个都是 `mini-a1b2` 这种，像两台不同的机器。
  */
 function loadClientName(): string {
   const file = join(app.getPath('userData'), 'client-name')
+  const profile = getProfile()
+  const short = os.hostname().split('.')[0] || 'client'
   try {
     if (existsSync(file)) {
       const saved = readFileSync(file, 'utf8').trim()
       if (saved) return saved
     }
-    const short = os.hostname().split('.')[0] || 'client'
-    const created = `${short}-${randomUUID().replace(/-/g, '').slice(0, 4)}`
+    const created = profile.isDefault
+      ? `${short}-${randomUUID().replace(/-/g, '').slice(0, 4)}`
+      : `${short}-${profile.name}`
     writeFileSync(file, created, 'utf8')
     return created
   } catch {
-    return `${os.hostname().split('.')[0] || 'client'}-${randomUUID().slice(0, 4)}`
+    return `${short}-${randomUUID().slice(0, 4)}`
   }
 }
 

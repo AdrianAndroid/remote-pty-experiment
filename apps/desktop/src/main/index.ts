@@ -5,22 +5,52 @@
  * 用户重新填。token 只在主进程里存在，永远不回传渲染层。
  */
 
+import { spawn } from 'node:child_process'
+import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { BrowserWindow, Menu, app, ipcMain, shell } from 'electron'
+import { BrowserWindow, Menu, app, dialog, ipcMain, shell } from 'electron'
 import type { MenuCommand, RelayConfig } from '../shared/ipc'
 import { IpcChannel } from '../shared/ipc'
 import { RelayClient } from './relay-client'
+import {
+  initProfile,
+  nextProfileName,
+  profilesRoot,
+  seedProfile
+} from './profile'
 import { loadConfig, saveConfig, saveReadOnly } from './store'
 
 let win: BrowserWindow | null = null
 
 // 打包后 app.getName() 会变成 productName（rpty），userData 目录会跟着换，
 // 导致开发版填过的 relay 地址和 token 在 .app 里读不到。这里固定成开发时的名字。
-// 同一台机器要跑两个实例时，用 RPTY_USERDATA 指到另一个目录，避免缓存目录互锁。
-app.setPath(
-  'userData',
-  process.env.RPTY_USERDATA || join(app.getPath('appData'), 'rpty-desktop')
-)
+//
+// 一个 profile = 一个客户端 = 一个 userData 目录：
+//   默认 profile 还是老路径（老用户零迁移），其余在 <根>/profiles/<名字>。
+//   RPTY_USERDATA 仍认，映射成名字叫 custom 的非默认 profile（开发用）。
+const profile = initProfile(profilesRoot(app.getPath('appData')), {
+  profile: process.env.RPTY_PROFILE,
+  userData: process.env.RPTY_USERDATA
+})
+app.setPath('userData', profile.dir)
+// 新 profile 目录可能还不存在：client-id / client-name 都是直接写文件的，
+// 目录不在就会退化成"每次启动换一个 id"的临时身份。
+mkdirSync(profile.dir, { recursive: true })
+
+// 同一 profile 只允许一个进程：第二次启动不再起一份，只把已有窗口提到前面。
+// 锁的作用范围就是 userData 目录，所以不同 profile 天然各锁各的。
+// 想要第二个客户端走「新建客户端…」菜单，别靠双击。
+const singleInstance = app.requestSingleInstanceLock()
+if (!singleInstance) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!win || win.isDestroyed()) return
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+  })
+}
 
 const relay = new RelayClient({
   onStatus: (status) => send(IpcChannel.RelayStatusChanged, status),
@@ -64,6 +94,8 @@ function createWindow(): void {
     minHeight: 480,
     show: false,
     backgroundColor: '#0f1017',
+    // 同机多个 profile 同时开着时，Mission Control / Dock / 窗口菜单里要分得清谁是谁。
+    title: profile.isDefault ? 'rpty' : `rpty · ${profile.name}`,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 14, y: 16 },
     webPreferences: {
@@ -94,6 +126,39 @@ function createWindow(): void {
   })
 }
 
+/**
+ * 起一个独立客户端：新 profile 目录 + 新进程。
+ *
+ * 不采用「同一进程再开一个窗口」：一个进程只持有一个 client_id，
+ * 多开窗口只会变成同一个客户端的两条连接，反而互相覆盖本地记录。
+ */
+function createClient(): void {
+  const root = profilesRoot(app.getPath('appData'))
+  const name = nextProfileName(root)
+  const dir = seedProfile(root, name, profile.dir)
+  const args = process.defaultApp ? [app.getAppPath(), ...process.argv.slice(2)] : []
+  const child = spawn(process.execPath, args, {
+    env: {
+      ...process.env,
+      RPTY_PROFILE: name,
+      // 清掉开发后门，否则会盖过 RPTY_PROFILE 之外的判断。
+      RPTY_USERDATA: ''
+    },
+    detached: true,
+    stdio: 'ignore'
+  })
+  child.unref()
+
+  void dialog.showMessageBox({
+    type: 'info',
+    message: `已新建客户端「${name}」`,
+    detail:
+      `它会出现在设备列表里，名字带 ${name} 后缀；终端和标签跟当前这个客户端互不影响。\n\n` +
+      `数据目录：${dir}`,
+    buttons: ['好']
+  })
+}
+
 function buildMenu(): void {
   const template: Electron.MenuItemConstructorOptions[] = [
     {
@@ -105,6 +170,16 @@ function buildMenu(): void {
           label: '重新连接 relay',
           accelerator: 'CmdOrCtrl+R',
           click: () => sendMenu('new-tab')
+        },
+        { type: 'separator' },
+        // 不起眼，但找得到：这是「再开一个客户端」的唯一入口。
+        // 起的是独立进程、独立 userData、独立 client_id，和当前这个互不影响。
+        {
+          label: '新建客户端…',
+          accelerator: 'CmdOrCtrl+Shift+N',
+          click: () => {
+            void createClient()
+          }
         },
         { type: 'separator' },
         { role: 'hide', label: '隐藏 rpty' },

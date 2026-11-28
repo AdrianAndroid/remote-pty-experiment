@@ -41,3 +41,6 @@ agent.log
 
 # OpenSpec 本地状态
 openspec/.cache/
+
+# 测试中间产物（apps/desktop/test 编译输出）
+.tmp/

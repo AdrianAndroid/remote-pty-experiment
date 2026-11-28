@@ -156,3 +156,41 @@ hover 提示里，只在「谁断开了连接」的提示中出现 —— 那里
 - 「自动建终端」只看这张桌面上有没有终端 —— 别人桌上的终端不算数，否则自己桌面明明空着却不再自动开。
 - 连上中继后自动进自己的桌面（`ownEnteredRef` 只触发一次）；之后按「离开」回在线列表，
   列表里的「我」依旧不可进入 —— 自己的终端不需要"连回去"。
+
+## profile：一台机器上开多个客户端
+
+以前「一个客户端」是隐式的：userData 目录是哪个，客户端就是哪个。于是同机双击两次 =
+两个进程共用一个 `client_id`（relay 里合并成一行），本地 `owned-sessions.json` 互相覆盖；
+要开第二个真客户端只能靠 `RPTY_USERDATA` 环境变量 —— 能用，但不是产品能力：每次要记路径、
+不算主窗口、列表里两个名字都是 `<主机短名>-4hex`，像两台不同的机器。
+
+现在把它显式化成 **profile**：
+
+| profile | userData 目录 | 设备列表里的名字 | `primary=1` |
+| --- | --- | --- | --- |
+| 默认（`default`） | `<appData>/rpty-desktop`（老路径，零迁移） | `<主机短名>-<4 位 hex>`（老规则） | 发 |
+| 新建（`client-2`…） | `<appData>/rpty-desktop/profiles/client-2` | `<主机短名>-client-2` | 不发 |
+| `RPTY_USERDATA` 老后门 | 指向哪就是哪，名字记作 `custom` | `<主机短名>-custom` | 不发 |
+
+规则与实现要点：
+
+- **入口**：`rpty` 菜单 → 「新建客户端…」（`⌘⇧N`）。自动起名（取现有最大号 +1，不回收空号）、
+  建目录、把当前 profile 的 `rpty-config.json` 复制过去（不用重新填地址和 token），
+  再 `spawn` 一个 `detached` 的新进程。父子进程互不影响，父进程退出不影响它。
+- **同一 profile 只允许一个进程**：`requestSingleInstanceLock()`（作用域就是 userData 目录）。
+  第二次启动直接退出，把已有窗口提到前面 —— 不再出现"两个进程抢写同一个 id"。
+- **不同 profile 天然并存**：各自一条 `/ctl`、各自一个 `client_id`、各自一套桌面。
+  A 里开的终端 B 看不到，这是设计意图。
+- **`primary` 语义改成"是不是默认 profile"**：否则新建的每个 profile 都被当副本，
+  无主会话的认领顺序会莫名其妙。
+- **代码位置**：解析层在 `apps/desktop/src/main/profile.ts`，不 import electron（纯函数，
+  `pnpm -C apps/desktop test` 直接断言）；`main/index.ts` 在 `app.setPath('userData')`
+  之前调 `initProfile`，窗口标题带上 profile 名，Mission Control 里分得清。
+- **与数据面 1:1 的关系**：不同 profile 各自一条 viewer 连接，天然不冲突；
+  同一 profile 只允许一个窗口，所以「多窗口共享一条数据连接」这件事暂时不需要做。
+
+踩过的坑：
+
+- 新 profile 目录可能不存在，而 `client-id` / `client-name` 是直接 `writeFileSync` 的 ——
+  不先 `mkdirSync` 就会退化成"每次启动换一个身份"。现在启动时无条件建目录。
+- 名字一旦写进 `client-name` 就不再变：改 profile 名不会改已生成的客户端名，要改就删那个文件。
