@@ -4,6 +4,7 @@
 
 > 状态：**Stage 1 已验收归档** —— 单宿主机 + 多客户端镜像端到端跑通，见 `26-stage-1-archive.md`。
 > 验证原始记录见 `22-environment-verified.md`。
+> 名词口径（宿主 / 客户端 / 会话 / 标签 / 观看者）以 `12-concept-model.md` 为唯一权威。
 
 ---
 
