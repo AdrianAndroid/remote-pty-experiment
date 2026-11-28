@@ -303,7 +303,12 @@ function registerIpc(): void {
     }
   })
 
-  ipcMain.handle(IpcChannel.RelayStatus, () => relay.status)
+  ipcMain.handle(IpcChannel.RelayStatus, async () => {
+    // 顺手补问一次宿主：用户点「刷新」就是想要一份当前实话，
+    // 不该因为他先开了窗口、后起了 agent 而一直显示「宿主未上线」。
+    await relay.refreshHost()
+    return relay.status
+  })
 
   ipcMain.handle(
     IpcChannel.NodeActivate,

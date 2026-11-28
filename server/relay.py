@@ -209,6 +209,9 @@ class Room:
     state: str = "open"
     # 房间里的 session_id，关房时按这份名单让宿主销毁 PTY。
     sessions: set = field(default_factory=set)
+    # 从两人各自的私有桌面「借」进来的 session_id：本来就在跑，散场时还回去，
+    # PTY 不杀。房间里现开的那些不在这张名单上，关房就跟着房间一起销毁。
+    borrowed: set = field(default_factory=set)
     created_at: float = 0.0
 
 
@@ -449,6 +452,8 @@ class Relay:
                     session = self._ensure_session(str(sid))
                     session.room = room.id
                     room.sessions.add(str(sid))
+                for sid in raw.get("borrowed") or []:
+                    room.borrowed.add(str(sid))
 
         for sid, room_id in (data.get("session_room") or {}).items():
             if sid and room_id and str(room_id) in self.rooms:
@@ -496,6 +501,7 @@ class Relay:
                                 "state": room.state,
                                 "created_at": room.created_at,
                                 "sessions": sorted(room.sessions),
+                                "borrowed": sorted(room.borrowed),
                             }
                             for room in self.rooms.values()
                         },
@@ -617,6 +623,16 @@ class Relay:
             client = self.clients.get(cid)
             if client is not None:
                 client.room = room.id
+        # 两人已有的私有终端跟着进房间：点「邀请」要的就是「两边合到一处」，
+        # 不是进一个空房间再让对面现开一个。借来的散场时还给原主人，进程不杀。
+        for cid in (a, b):
+            for session in list(self.sessions.values()):
+                if session.room or session.owner != cid:
+                    continue
+                session.room = room.id
+                room.sessions.add(session.id)
+                room.borrowed.add(session.id)
+
         self.invites.pop(a, None)
         self.invites.pop(b, None)
         self._save_state()
@@ -655,6 +671,16 @@ class Relay:
         # 房间里的终端跟着房间一起销毁：房间关了就没有合法观看者，
         # 留一个没人能连的 PTY 只是占资源、扩泄漏面。
         for sid in list(room.sessions):
+            # 借来的：散场后回到原主人的私有桌面。owner 一直没动，清掉 room 就归位了。
+            # 数据面照样收尾 —— 房间外的观看者不能因为房间关了继续挂在别人终端上。
+            if sid in room.borrowed:
+                borrowed = self.sessions.get(sid)
+                if borrowed is not None:
+                    borrowed.room = ""
+                    if borrowed.token:
+                        await self._close_data_channel(borrowed.token, "room_closed")
+                continue
+
             session = self.sessions.pop(sid, None)
             node = self.nodes.get(session.node) if session is not None and session.node else None
             if node is not None and node.ws is not None:
@@ -675,6 +701,8 @@ class Relay:
             await self._send_to_client(
                 cid, {"type": "ROOM_CLOSED", "room": room_id, "reason": reason}
             )
+            # 还回去的终端要重新回到主人的列表里：不推这一下，他回桌面会看到它们消失。
+            await self._push_session_lists(cid)
         LOG.info("房间 %s 关闭（%s）", room_id, reason)
         self._save_state()
         await self.broadcast_clients()

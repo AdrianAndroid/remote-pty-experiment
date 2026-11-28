@@ -280,6 +280,78 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         rows = again.last("SESSION_LIST")["sessions"]
         self.assertEqual([row["session_id"] for row in rows], ["s1"])
 
+    async def test_room_open_borrows_existing_private_sessions(self) -> None:
+        """点「邀请」要的是「两边合到一处」：已经在跑的私有终端跟着进房间。"""
+        agent = await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.create(a, sid="s1", token="t1")
+        await self.feed(
+            agent,
+            {
+                "type": "SESSION_LIST",
+                "sessions": [
+                    {"session_id": "s1", "data_token": "t1", "cols": 80, "rows": 24, "index": 1}
+                ],
+            },
+        )
+        # 建房之前，c1 的终端 c2 一行都看不到
+        self.assertEqual(b.last("SESSION_LIST")["sessions"], [])
+
+        await self.open_room(a, "c1", b, "c2")
+
+        session = self.relay.sessions["s1"]
+        room_id = self.relay.clients["c1"].room
+        self.assertEqual(session.room, room_id)
+        self.assertEqual(session.owner, "c1", "借进来的终端仍记着原主人，散场要还回去")
+        self.assertIn("s1", self.relay.rooms[room_id].borrowed)
+        rows = b.last("SESSION_LIST")["sessions"]
+        self.assertEqual([row["session_id"] for row in rows], ["s1"])
+
+    async def test_room_close_returns_borrowed_sessions_to_owner(self) -> None:
+        """散场不杀进程：借进来的终端回到原主人的私有桌面，房间里的人再也看不见。"""
+        agent = await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.create(a, sid="s1", token="t1")
+        await self.feed(
+            agent,
+            {
+                "type": "SESSION_LIST",
+                "sessions": [
+                    {"session_id": "s1", "data_token": "t1", "cols": 80, "rows": 24, "index": 1}
+                ],
+            },
+        )
+        await self.open_room(a, "c1", b, "c2")
+        agent.sent.clear()
+
+        await self.feed(a, {"type": "ROOM_LEAVE"})
+        await self.settle()
+
+        self.assertEqual(agent.of_type("SESSION_CLOSE"), [], "借来的终端不该被关房杀掉")
+        session = self.relay.sessions["s1"]
+        self.assertEqual(session.room, "")
+        self.assertEqual(session.owner, "c1")
+        self.assertEqual([row["session_id"] for row in a.last("SESSION_LIST")["sessions"]], ["s1"])
+        self.assertEqual([row["session_id"] for row in b.last("SESSION_LIST")["sessions"]], [])
+
+    async def test_room_close_kills_sessions_created_inside(self) -> None:
+        """房间里现开的终端属于房间：房间关了就没有合法观看者，跟着一起销毁。"""
+        agent = await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.open_room(a, "c1", b, "c2")
+        await self.create(a, sid="s9", token="t9")
+        agent.sent.clear()
+
+        await self.feed(b, {"type": "ROOM_LEAVE"})
+        await self.settle()
+
+        closes = agent.of_type("SESSION_CLOSE")
+        self.assertEqual([e["session_id"] for e in closes], ["s9"])
+        self.assertNotIn("s9", self.relay.sessions)
+
     # ---------------------------------------------------------------- 尺寸仲裁
 
     async def test_resize_only_from_creator(self) -> None:

@@ -289,7 +289,25 @@ export class RelayClient {
     if (label) this.hostname = label
 
     this.setAgentOnline(online.length > 0)
+
+    // 自己是谁的宿主，只问过一次（connect 时）。如果那次 agent 还没起来，
+    // 之后就一直空着 —— 列表上自己那张卡永远写「宿主未上线」，「我的终端」也没有。
+    // 节点表一推就说明 relay 手里至少有一台在线的，这时候补问一次。
+    if (!this.hostNode && online.length > 0) {
+      void askLocalAgent().then((node) => {
+        if (node) this.claimHost(node)
+      })
+    }
+
     this.setStatus(this.phase)
+  }
+
+  /** 让上层（刷新按钮 / 重连）有机会重新问一次「我是谁的宿主」。 */
+  async refreshHost(): Promise<string> {
+    if (this.hostNode) return this.hostNode
+    const node = await askLocalAgent()
+    if (node) this.claimHost(node)
+    return node
   }
 
   /** 认领宿主并把归属告诉 relay —— 之后列表按客户端展示，进入就是进它。 */

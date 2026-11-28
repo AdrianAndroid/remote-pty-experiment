@@ -500,7 +500,7 @@ export default function App(): React.JSX.Element {
   /** 进自己的桌面：只看自己宿主上的私有终端，随时回列表。 */
   const openMine = useCallback(async () => {
     if (!ownHostNode) {
-      setError('本机宿主没上线，先在这台机器上把 agent 跑起来')
+      setError('本机宿主没上线：这台机器上的 agent 没在跑（或还没注册节点）。起来之后再点一次。')
       return
     }
     setError('')
@@ -678,7 +678,9 @@ export default function App(): React.JSX.Element {
           onInvite={(clientId) => void inviteClient(clientId)}
           onExitRelay={() => void handleDisconnect()}
           onReload={() => void window.rpty.getStatus().then(setStatus)}
-          onOpenMine={ownHostNode ? () => void openMine() : undefined}
+          // 入口常驻：没宿主也要能点一次，点了会明确告诉你「本机 agent 没起来」，
+          // 而不是把一个按钮藏起来让用户猜自己的终端去哪了。
+          onOpenMine={() => void openMine()}
         />
         <InviteDialog
           invite={invite}

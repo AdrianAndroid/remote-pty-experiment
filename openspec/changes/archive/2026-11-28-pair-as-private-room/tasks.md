@@ -77,3 +77,11 @@
   但重启瞬间正在跑的数据连接会断，重连会重新挂回来。
 - **节点卡片上的终端数含房间内会话**（只数量、无 id）：仍是轻微可见性泄露，
   要在 `clients_summary` 里按可见域重算才能消，P3 之后再处理。
+
+## 补充：建房时借用已有终端（同日验收后补）
+
+- [x] `Room.borrowed` 记"借进来的" session_id
+- [x] `_open_room` 把两人的私有会话 `room` 指向房间，`owner` 保留
+- [x] `_close_room` 对 borrowed 只清 `room` + 收尾数据面，不发 `SESSION_CLOSE`
+- [x] `rooms` 落盘带 `borrowed`，重启后仍知道哪些要还
+- [x] 测试 3 条：借进来两边都看得见 / 散场归还且不杀 PTY / 房里现开的随房销毁（38 passed）
