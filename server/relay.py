@@ -22,16 +22,20 @@ target 指定开在哪台。不同节点互不顶替，只有同一个 node_id �
 
 relay 不解析终端字节流、不生成会话 id；token 由控制端生成。
 
-状态模型（一份事实，三个实体）：
+状态模型（一份事实，四个实体）：
 
-    Client {id, conns[], name, host, pair}   —— 一个客户端进程 = 在线列表的一行
+    Client {id, conns[], name, host, room}   —— 一个客户端进程 = 在线列表的一行
     Node   {id, ws, name, platform, last_list} —— 一台被控机上的宿主进程
-    Session{id, token, node, owner, index, ...} —— 一个 PTY：跑在哪、属于谁、几号
+    Session{id, token, node, owner, room, index} —— 一个 PTY：跑在哪、属于谁、几号
+    Room   {id, members[2], state, sessions}  —— 一次一对一通话，房间外不可见
 
-    外加两张纯索引：by_ws（连接 → 客户端）、viewers（cid → viewer，供快照定向）。
+「谁在线」= clients 里那条有没有 conns；「谁在通话中」= Client.room 非空。
+会话有两个可见域：私有（owner = 某个客户端）和房间（room = 某次通话）。
+**服务端按可见域逐个挑人发**，不是"广播给所有人、客户端自己过滤" —— 后者是自觉，不是边界。
 
-「谁在线」= clients 里那条有没有 conns；「谁连着谁」= Client.host / Client.pair。
-归属、编号、认领记录落盘在 RPTY_STATE_FILE，重启后不换主人、不重号。
+房间是强耦合的：一方断线先进入 30 秒宽限（断网重连能续），超时或任一方离开就关房，
+房间里的 PTY 一起销毁，两人都回到列表。
+归属、编号、认领记录、房间落盘在 RPTY_STATE_FILE，重启后不换主人、不重号、不泄密。
 
 环境变量：
     RPty_TOKEN      必填，agent 与 ctl 共用的共享密钥
@@ -54,7 +58,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
-import websockets
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
 
@@ -64,13 +67,11 @@ from websockets.exceptions import ConnectionClosed
 # 12.x 还是老实现（ws.path、process_request(path, headers)）。两套都认，
 # 这样镜像里装哪个版本都能起，升级只是部署时机问题。
 try:  # 15+
-    from websockets.asyncio.server import ServerConnection as WSConn
     from websockets.asyncio.server import serve as ws_serve
     from websockets.http11 import Response as HTTPResponse
 
     NEW_WS_API = True
 except ImportError:  # 12.x
-    from websockets.server import WebSocketServerProtocol as WSConn  # type: ignore[assignment]
     from websockets.server import serve as ws_serve  # type: ignore[assignment]
 
     HTTPResponse = None  # type: ignore[assignment]
@@ -85,12 +86,18 @@ def ws_path(ws: Any) -> str:
     request = getattr(ws, "request", None)
     return str(getattr(request, "path", "") or "")
 
+
 LOG = logging.getLogger("relay")
 
 # 终端输出可能一次来很大（比如 cat 一个二进制文件），但不能无限。
 MAX_MESSAGE = 8 * 1024 * 1024
 # viewer 还没拿到快照时最多替它排队多少条增量，超了就丢（宁可少画一段也不能撑爆内存）。
 VIEWER_QUEUE_MAX = 512
+# 房间一方断线后的宽限期：断网重连能续上，超过就关房并销毁终端。
+# 不做宽限的话，Wi-Fi 抖一下就把 vim 里没保存的东西一起带走。
+ROOM_GRACE_SECONDS = 30.0
+# 邀请的有效期：过期的邀请不该还能被同意 —— 那等于可以替十分钟前的自己决定。
+ROOM_INVITE_TTL = 120.0
 
 
 # ---------------------------------------------------------------- 状态模型
@@ -131,8 +138,8 @@ class Client:
     name: str = ""
     # 它认领的宿主 node id（本机 agent）；没认领就是空。
     host: str = ""
-    # 「我进了谁」：{"to": 目标 client id, "node": 目标宿主}，没配对就是 None。
-    pair: Optional[Dict[str, str]] = None
+    # 所在房间 id。空 = 不在房间里（待配对状态）。排他：一个人同时只能在一个房间。
+    room: str = ""
 
     @property
     def online(self) -> bool:
@@ -147,7 +154,10 @@ class Session:
     token: str = ""
     node: str = ""
     # 谁的桌面（client id）。空 = 无主，会被认领给 default_claimant。
+    # 只在**私有域**里有意义：room 非空时，可见性完全由房间决定，owner 不参与。
     owner: str = ""
+    # 可见域二：房间 id。非空 = 这条终端属于房间，只有房间成员看得见。
+    room: str = ""
     index: int = 0
     cols: int = 0
     rows: int = 0
@@ -180,6 +190,28 @@ class Channel:
     viewers: Dict[str, Viewer] = field(default_factory=dict)
 
 
+@dataclass
+class Room:
+    """一次一对一通话：两个客户端，共享同一批终端，房间外不可见。
+
+    生命周期就是"两条连接同时都在"的那段时间：
+
+        INVITE → ACCEPT → open ──一方断线──→ half（30 秒宽限）
+                            └──重连──────────→ open
+                            └──超时 / 任一方离开 / 关窗──→ 关闭（终端一起销毁）
+
+    排他：一个客户端同时只能在一个房间里，所以 members 最多两个。
+    """
+
+    id: str
+    members: List[str] = field(default_factory=list)
+    # open：两人都连着；half：一方断线，正在等它重连。
+    state: str = "open"
+    # 房间里的 session_id，关房时按这份名单让宿主销毁 PTY。
+    sessions: set = field(default_factory=set)
+    created_at: float = 0.0
+
+
 class Relay:
     def __init__(self, token: str) -> None:
         self.token = token
@@ -191,6 +223,15 @@ class Relay:
         self.clients: Dict[str, Client] = {}
         # session_id -> Session，同时承担路由 / 归属 / 发号。
         self.sessions: Dict[str, Session] = {}
+
+        # ---- 房间：一对一的私密会话
+        # room_id -> Room。房间里的终端只有 members 看得见。
+        self.rooms: Dict[str, Room] = {}
+        # 待对方同意的邀请：被邀请的 client id -> {"from": 谁, "at": 什么时候}
+        self.invites: Dict[str, Dict[str, Any]] = {}
+        # 宽限期计时器：room_id -> 定时任务，重连时要能取消。
+        self._room_timers: Dict[str, Any] = {}
+        self._room_seq = 0
 
         # ---- 两张索引
         # 连接 -> 客户端，握手时建，断开时删。
@@ -238,10 +279,6 @@ class Relay:
         supplied = (query.get("token") or [""])[0]
         # 长度不等的比较会泄漏长度，用固定时间比较。
         return len(supplied) == len(self.token) and _const_eq(supplied, self.token)
-
-    def ctl_conns(self) -> List[Any]:
-        """此刻在线的所有控制端连接（广播用快照，避免 await 期间被改）。"""
-        return [ws for client in self.clients.values() for ws in list(client.conns)]
 
     def _ensure_client(self, ws: Any, client_id: str, name: str = "", host: str = "") -> Client:
         client = self.clients.get(client_id)
@@ -390,6 +427,41 @@ class Relay:
                 if sid:
                     self._ensure_session(str(sid)).claimed = True
 
+        # 房间也要活过重启：否则 relay 一重启，房间里的终端全变成"无主"，
+        # 谁都能看见 —— 那就是隐私漏洞，不是可用性问题。
+        rooms = data.get("rooms") or {}
+        if isinstance(rooms, dict):
+            for room_id, raw in rooms.items():
+                if not isinstance(raw, dict):
+                    continue
+                members = [str(x) for x in (raw.get("members") or []) if x]
+                if len(members) != 2:
+                    continue
+                room = Room(
+                    id=str(room_id),
+                    members=members,
+                    state=str(raw.get("state") or "half"),
+                    created_at=float(raw.get("created_at") or 0),
+                )
+                self.rooms[room.id] = room
+                for sid in raw.get("sessions") or []:
+                    session = self._ensure_session(str(sid))
+                    session.room = room.id
+                    room.sessions.add(str(sid))
+
+        for sid, room_id in (data.get("session_room") or {}).items():
+            if sid and room_id and str(room_id) in self.rooms:
+                self._ensure_session(str(sid)).room = str(room_id)
+
+        self._room_seq = max(
+            (
+                int(room.id[1:])
+                for room in self.rooms.values()
+                if room.id[:1] == "r" and room.id[1:].isdigit()
+            ),
+            default=0,
+        )
+
         self.seq = max((s.index for s in self.sessions.values()), default=0)
         LOG.info(
             "恢复状态：会话 %d 条（有主 %d），认领者 %s",
@@ -415,6 +487,20 @@ class Relay:
                         "claimant": self.default_claimant,
                         "claimant_primary": self.claimant_primary,
                         "claimed": sorted(s.id for s in self.sessions.values() if s.claimed),
+                        # 房间与会话的可见域一起落盘：重启后房间里的终端仍然是私密的，
+                        # 不能退化成"无主"被谁都能看见。
+                        "rooms": {
+                            room.id: {
+                                "members": list(room.members),
+                                "state": room.state,
+                                "created_at": room.created_at,
+                                "sessions": sorted(room.sessions),
+                            }
+                            for room in self.rooms.values()
+                        },
+                        "session_room": {
+                            s.id: s.room for s in self.sessions.values() if s.room
+                        },
                     },
                     f,
                     ensure_ascii=False,
@@ -442,17 +528,284 @@ class Relay:
         self._save_state()
         LOG.info("主窗口认领：%s -> %s，迁移 %d 个会话", old[:8] or "-", client_id[:8], moved)
 
+    # ------------------------------------------------------------ 可见性
+
+    def _session_visible(self, client_id: str, session: Session) -> bool:
+        """一条终端对某个客户端是否可见 —— 「小黑屋」的唯一判据。
+
+        两个可见域，只有这两种：
+
+        房间域（session.room 非空）：只有房间成员看得见。房间外的人连列表都收不到，
+            数据面也用同一条判断（P2 在 /d 上再拦一道）。
+        私有域（session.room 为空）：只有主人看得见；无主的归默认认领者。
+
+        注意：这里判断的是"服务端发不发"，不是"界面显不显示"。界面过滤是客户端自觉，
+        不能当隐私边界用。
+        """
+        if session.room:
+            room = self.rooms.get(session.room)
+            return bool(room) and client_id in room.members
+        if session.owner:
+            return session.owner == client_id
+        # 无主：归默认认领者。没有认领者时（单客户端刚起的场景）才放开。
+        return client_id == self.default_claimant or not self.default_claimant
+
+    def _row_visible(self, client_id: str, row: Dict[str, Any]) -> bool:
+        """列表里的一行（SESSION_LIST 的 item）是否该发给这个客户端。"""
+        sid = str((row or {}).get("session_id") or "")
+        session = self.sessions.get(sid) if sid else None
+        if session is not None:
+            return self._session_visible(client_id, session)
+        # 没有会话记录的（老状态、宿主刚重启还没对齐）：只认行上的 owner。
+        # 判不出来就不发 —— 宁可少显示一条，不可多泄露一条。
+        return str((row or {}).get("owner") or "") == client_id
+
+    # ------------------------------------------------------------ 房间
+
+    def _client_room(self, client_id: str) -> Optional[Room]:
+        client = self.clients.get(client_id)
+        if client is None or not client.room:
+            return None
+        return self.rooms.get(client.room)
+
+    async def _send_to_client(self, client_id: str, payload: Dict[str, Any]) -> None:
+        client = self.clients.get(client_id)
+        if client is None:
+            return
+        for ws in list(client.conns):
+            await self.send_json(ws, payload)
+
+    def _new_room_id(self) -> str:
+        self._room_seq += 1
+        return f"r{self._room_seq:04d}"
+
+    def _peer_of(self, room: Room, client_id: str) -> str:
+        for cid in room.members:
+            if cid != client_id:
+                return cid
+        return ""
+
+    async def _open_room(self, a: str, b: str) -> Room:
+        """双向同意后建房间：两人各收一份 ROOM_OPEN，带对方的客户端卡片。"""
+        room = Room(id=self._new_room_id(), members=[a, b], created_at=time.time())
+        self.rooms[room.id] = room
+        for cid in (a, b):
+            client = self.clients.get(cid)
+            if client is not None:
+                client.room = room.id
+        self.invites.pop(a, None)
+        self.invites.pop(b, None)
+        self._save_state()
+
+        for cid in (a, b):
+            peer_id = self._peer_of(room, cid)
+            peer = self.clients.get(peer_id)
+            await self._send_to_client(
+                cid,
+                {
+                    "type": "ROOM_OPEN",
+                    "room": room.id,
+                    "members": room.members,
+                    "peer": {
+                        "client": peer_id,
+                        "name": peer.name if peer else "",
+                        "host": peer.host if peer else "",
+                    },
+                },
+            )
+        LOG.info("房间 %s 打开：%s <-> %s", room.id, a[:8], b[:8])
+        await self.broadcast_clients()
+        return room
+
+    async def _close_room(self, room_id: str, reason: str) -> None:
+        """关房：通知双方、销毁房间内终端、两人一起回列表。"""
+        room = self.rooms.pop(room_id, None)
+        if room is None:
+            return
+        timer = self._room_timers.pop(room_id, None)
+        if timer is not None:
+            timer.cancel()
+
+        # 房间里的终端跟着房间一起销毁：房间关了就没有合法观看者，
+        # 留一个没人能连的 PTY 只是占资源、扩泄漏面。
+        for sid in list(room.sessions):
+            session = self.sessions.pop(sid, None)
+            node = self.nodes.get(session.node) if session is not None and session.node else None
+            if node is not None and node.ws is not None:
+                await self.send_json(
+                    node.ws, {"type": "SESSION_CLOSE", "session_id": sid, "target": node.id}
+                )
+            # 数据面也要一起收尾：不关 viewer 的话，那条连接会挂在一个已经没人管的
+            # 通道上，画面停在最后一帧，用户以为终端还在。
+            if session is not None and session.token:
+                await self._close_data_channel(session.token, "session_closed")
+            self._drop_from_lists(sid)
+        room.sessions.clear()
+
+        for cid in room.members:
+            client = self.clients.get(cid)
+            if client is not None and client.room == room_id:
+                client.room = ""
+            await self._send_to_client(
+                cid, {"type": "ROOM_CLOSED", "room": room_id, "reason": reason}
+            )
+        LOG.info("房间 %s 关闭（%s）", room_id, reason)
+        self._save_state()
+        await self.broadcast_clients()
+
+    def _schedule_room_grace(self, room_id: str, grace: Optional[float] = None) -> None:
+        """一方断线后开始计时。期间重连就取消，超时才关房。"""
+        if room_id in self._room_timers:
+            return
+        # 默认值在调用时取，不在定义时绑定 —— 否则测试改 ROOM_GRACE_SECONDS 不生效。
+        delay = ROOM_GRACE_SECONDS if grace is None else grace
+
+        async def _expire() -> None:
+            try:
+                await asyncio.sleep(delay)
+                room = self.rooms.get(room_id)
+                if room is None or room.state != "half":
+                    return
+                await self._close_room(room_id, "peer_timeout")
+            finally:
+                self._room_timers.pop(room_id, None)
+
+        self._room_timers[room_id] = asyncio.create_task(_expire())
+
+    async def _resume_room(self, client: Client) -> None:
+        """重连回一个还活着的房间：取消宽限计时，通知对方"他回来了"。
+
+        房间是按 client id 记住成员的，而 client 对象在最后一条连接断开时会被删掉，
+        所以重连必须靠 room.members 反查回来 —— 这也正是"断网重连不掉线"的实现位置。
+        """
+        if not client.id:
+            return
+        for room in self.rooms.values():
+            if client.id not in room.members:
+                continue
+            client.room = room.id
+            timer = self._room_timers.pop(room.id, None)
+            if timer is not None:
+                timer.cancel()
+            peer_id = self._peer_of(room, client.id)
+            peer = self.clients.get(peer_id)
+            if room.state == "half":
+                room.state = "open"
+                await self._send_to_client(
+                    peer_id, {"type": "ROOM_PEER_BACK", "room": room.id}
+                )
+                LOG.info("房间 %s 成员 %s 重连，宽限取消", room.id, client.id[:8])
+            # 回来的这一端也要知道自己还在房间里，否则界面会停在列表上，
+            # 而房间其实已经把它算成成员了 —— 那种错位最难查。
+            await self._send_to_client(
+                client.id,
+                {
+                    "type": "ROOM_OPEN",
+                    "room": room.id,
+                    "members": room.members,
+                    "peer": {
+                        "client": peer_id,
+                        "name": peer.name if peer else "",
+                        "host": peer.host if peer else "",
+                    },
+                    "resumed": True,
+                },
+            )
+            await self.broadcast_clients()
+            return
+
+    async def _handle_room_invite(self, ws: Any, client: Client, msg: Dict[str, Any]) -> None:
+        target = str(msg.get("to") or "").strip()
+        if not client.id:
+            await self._error(ws, "need_client", "邀请需要客户端身份")
+            return
+        if not target:
+            await self._error(ws, "no_target", "没说要邀请谁")
+            return
+        if target == client.id:
+            await self._error(ws, "self", "不能和自己配对")
+            return
+        mine = self._client_room(client.id)
+        if mine is not None:
+            await self._error(ws, "busy", "你已经在通话中，先离开再说")
+            return
+        peer = self.clients.get(target)
+        if peer is None or not peer.online:
+            await self._error(ws, "offline", "对方不在线")
+            return
+        if peer.room:
+            # 不告诉邀请者"对方跟谁在一起"，只说忙。
+            await self._error(ws, "peer_busy", "对方正在私密会话中")
+            return
+
+        self.invites[target] = {"from": client.id, "at": time.time()}
+        await self._send_to_client(
+            target,
+            {
+                "type": "ROOM_INVITE",
+                "from": {"client": client.id, "name": client.name, "host": client.host},
+            },
+        )
+        await self.send_json(ws, {"type": "ROOM_INVITED", "to": target})
+        LOG.info("客户端 %s 邀请 %s", client.id[:8], target[:8])
+
+    async def _handle_room_answer(self, ws: Any, client: Client, accept: bool) -> None:
+        invite = self.invites.pop(client.id, None)
+        if not invite:
+            await self._error(ws, "no_invite", "没有待处理的邀请")
+            return
+        if time.time() - float(invite.get("at") or 0) > ROOM_INVITE_TTL:
+            await self._send_to_client(
+                str(invite.get("from") or ""), {"type": "ROOM_EXPIRED", "by": client.id}
+            )
+            await self._error(ws, "invite_expired", "邀请已过期，让对方重新发起")
+            return
+        other = str(invite.get("from") or "")
+        peer = self.clients.get(other)
+        if not accept:
+            await self._send_to_client(other, {"type": "ROOM_DECLINED", "by": client.id})
+            return
+        if client.room:
+            await self._error(ws, "busy", "你已经在通话中")
+            return
+        if peer is None or not peer.online or peer.room:
+            await self._error(ws, "peer_gone", "对方已经不在线或已进入别的通话")
+            return
+        await self._open_room(client.id, other)
+
+    async def _error(self, ws: Any, code: str, message: str) -> None:
+        await self.send_json(ws, {"type": "ERROR", "code": code, "message": message})
+
     # ---------------------------------------------------------------- 信令
 
     async def broadcast_ctls(self, payload: Dict[str, Any]) -> None:
-        """把 agent 的消息广播给所有在线控制端。
+        """把 agent 的消息分发给控制端 —— **按可见域逐个挑人**。
 
-        各客户端只认自己 bySessionId 里的 session_id，别人的会话消息会被忽略，
-        所以广播是安全的；不用为每个会话追踪它属于哪个 ctl。
+        以前这里是"所有人一份"：会话列表无差别广播，靠客户端按 owner 自己过滤显示。
+        那是客户端自觉，不是隐私边界。房间模型要求服务端根本不发：
+        房间外的连接不该收到房间内任何会话的 id、快照、字节。
+
+        三种情形：
+
+        - 带 `sessions` 列表的（SESSION_LIST）：每人一份，只留他能看的行；
+        - 带 `session_id` 的（CREATED / CLOSED / 快照类）：看不见的人直接跳过；
+        - 其它（NODE_ONLINE / NODES / CLIENTS 这些节点级状态）：广播，在线状态是公共信息。
         """
         if isinstance(payload.get("sessions"), list):
             payload = self.decorate_sessions(payload)
-        for ws in self.ctl_conns():
+
+        rows = payload.get("sessions") if isinstance(payload.get("sessions"), list) else None
+        sid = str(payload.get("session_id") or "")
+
+        for ws, client in list(self.by_ws.items()):
+            if rows is not None:
+                visible = [row for row in rows if self._row_visible(client.id, row)]
+                await self.send_json(ws, {**payload, "sessions": visible})
+                continue
+            if sid:
+                session = self.sessions.get(sid)
+                if session is not None and not self._session_visible(client.id, session):
+                    continue
             await self.send_json(ws, payload)
 
     def decorate_sessions(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -461,6 +814,10 @@ class Relay:
         没有 owner 的会话（归属机制上线前建的、或 relay 重启把表弄丢）在这里
         一次性认给默认认领者并落盘。不这么做的话，两端都说"不是我的"，
         同一个终端会同时挂两个「共享」标 —— 标签就失去了唯一性。
+
+        **房间里的会话不参与认领**：它们的可见性由 room 决定，owner 必须是空。
+        漏了这一句，房间里的终端会被"认领"成默认认领者的私有终端，
+        也就把小黑屋的东西写到了某张桌面上。
         """
         rows = []
         claimed = False
@@ -468,6 +825,9 @@ class Relay:
             if isinstance(item, dict):
                 sid = str(item.get("session_id") or "")
                 session = self.sessions.get(sid) if sid else None
+                if session is not None and session.room:
+                    rows.append({**item, "owner": ""})
+                    continue
                 owner = session.owner if session is not None else ""
                 if not owner and sid and self.default_claimant:
                     session = self._ensure_session(sid)
@@ -496,6 +856,9 @@ class Relay:
 
         表里一行就是一个客户端；同一个 client id 的两条连接已经在 Client.conns 里合并。
         匿名连接（不带 client 参数）归在 key="" 的桶里，不进列表。
+
+        `busy` 是"这个人在通话中"，**不含对方是谁**：小黑屋不该在墙上挂牌子。
+        第三方只需要知道点不动，不需要知道谁跟谁在聊。
         """
         out: List[Dict[str, Any]] = []
         for client in self.clients.values():
@@ -504,6 +867,7 @@ class Relay:
             node = self.nodes.get(client.host) if client.host else None
             # 卡片上写的是「这个客户端自己的终端数」，不是整台机器上有多少：
             # 一张桌面一套终端，数别人的会让两个客户端都显示同一个大数字。
+            # 房间里的终端不算进任何人的卡片 —— 它们属于房间，不属于某张桌面。
             alive = (
                 {
                     str(row.get("session_id") or "")
@@ -513,6 +877,7 @@ class Relay:
                 if node
                 else set()
             )
+            room = self.rooms.get(client.room) if client.room else None
             out.append(
                 {
                     "client": client.id,
@@ -521,37 +886,27 @@ class Relay:
                     "online": True,
                     "host_name": node.name if node else "",
                     "host_online": bool(node and node.ws is not None),
+                    "busy": room is not None,
+                    # 在通话中但一方掉线、正在等重连：列表上要写成「通话中 · 重连中」，
+                    # 否则第三方会站在那儿白等一个已经不在的人。
+                    "reconnecting": bool(room is not None and room.state == "half"),
                     "sessions": sum(
                         1
                         for sid, session in self.sessions.items()
-                        if session.owner == client.id and sid in alive
+                        if session.owner == client.id and not session.room and sid in alive
                     ),
                 }
             )
         return out
 
     def pairs_summary(self) -> List[Dict[str, Any]]:
-        """当前配对表（进 -> 被进）。目标客户端已经下线的配对自动作废，不再广播。"""
-        out: List[Dict[str, Any]] = []
-        for client in list(self.clients.values()):
-            pair = client.pair
-            if not pair:
-                continue
-            to = pair.get("to", "")
-            target = self.clients.get(to) if to else None
-            if target is None or not target.online:
-                client.pair = None
-                continue
-            out.append(
-                {
-                    "from": client.id,
-                    "from_name": client.name,
-                    "to": to,
-                    "to_name": target.name,
-                    "node": pair.get("node", ""),
-                }
-            )
-        return out
+        """历史接口，返回空表。
+
+        以前这里把"谁进了谁"广播给所有人 —— 等于把小黑屋的门牌挂出来。
+        配对关系现在只通过 `ROOM_OPEN` 定向告诉房间内的两个人，
+        对外一律不可见。保留这个函数只为不破坏旧客户端对 `pairs` 字段的解析。
+        """
+        return []
 
     async def broadcast_clients(self) -> None:
         await self.broadcast_ctls(
@@ -761,18 +1116,31 @@ class Relay:
                 "clients": self.clients_summary(),
                 "pairs": self.pairs_summary(),
                 "server_time": int(time.time()),
-                "version": "1.3.0",
+                "version": "1.4.0",
             },
         )
         # 先把各节点缓存的会话列表直接甩给新控制端 —— 它要在几百毫秒内知道
         # 每台机器上已经有谁在开终端，才不会急着自己新建一个。
+        #
+        # 注意这里必须逐行过滤：这是 client 刚连上、还没进任何房间的时刻，
+        # 直接把 node.last_list 原样发出去，等于把别人房间里的终端编号告诉他。
         for node in self.nodes.values():
             if node.last_list is not None:
-                await self.send_json(ws, self.decorate_sessions(node.last_list))
+                decorated = self.decorate_sessions(node.last_list)
+                rows = [
+                    row
+                    for row in (decorated.get("sessions") or [])
+                    if self._row_visible(client.id, row)
+                ]
+                await self.send_json(ws, {**decorated, "sessions": rows})
         # 再让每个节点补发一次权威列表（缓存可能过期：刚关/刚建）。
         for node in self.nodes.values():
             if node.ws is not None:
                 await self.send_json(node.ws, {"type": "CTL_ONLINE"})
+
+        # 重连回来的可能正处在一个"等它回来"的房间里 —— 在 HELLO 之后把房间接上，
+        # 顺序不能反：客户端要先认识自己是谁、有哪些客户端，再收到"你还在房间里"。
+        await self._resume_room(client)
 
         try:
             async for raw in ws:
@@ -803,31 +1171,30 @@ class Relay:
                 await self.broadcast_clients()
             return
 
+        if msg_type == "ROOM_INVITE":
+            await self._handle_room_invite(ws, client, msg)
+            return
+
+        if msg_type in ("ROOM_ACCEPT", "ROOM_DECLINE"):
+            await self._handle_room_answer(ws, client, msg_type == "ROOM_ACCEPT")
+            return
+
+        if msg_type == "ROOM_LEAVE":
+            room = self._client_room(client.id)
+            if room is None:
+                await self._error(ws, "no_room", "你不在通话中")
+                return
+            await self._close_room(room.id, "left")
+            return
+
         if msg_type in ("CTL_PAIR", "CTL_UNPAIR"):
-            # 配对 = 「我进了哪个客户端」。不是节点订阅：一个宿主上可能挂着
-            # 好几个客户端，谁进的谁、要说得清，才能两边都显示出来。
-            changed = False
-            if msg_type == "CTL_UNPAIR":
-                if client.pair is not None:
-                    client.pair = None
-                    changed = True
-            else:
-                target = str(msg.get("client") or "")
-                node = str(msg.get("node") or "")
-                if client.id and node and target:
-                    client.pair = {"to": target, "node": node}
-                    changed = True
-                    LOG.info(
-                        "客户端 %s 进入客户端 %s（宿主 %s）",
-                        client.name or client.id[:8],
-                        str(msg.get("to_name") or target)[:12],
-                        node,
-                    )
-                elif client.pair is not None:
-                    client.pair = None
-                    changed = True
-            if changed:
-                await self.broadcast_clients()
+            # 老的单向配对已下线：A 点一下就把自己塞进 B 的桌面，正是"小黑屋"要防的事。
+            # 保留解析只为给老客户端一句能看懂的话，不再产生任何房间。
+            await self._error(
+                ws,
+                "pair_removed",
+                "配对已改成双向邀请（ROOM_INVITE / ROOM_ACCEPT），请升级客户端",
+            )
             return
 
         if msg_type == "CTL_LEAVE":
@@ -896,14 +1263,18 @@ class Relay:
                 session.node = node.id
                 if token:
                     session.token = token
-                # 我正在别人客户端里开终端：这个 PTY 属于那张桌面，
-                # 否则它会挂在我名下、对方那边看不见。
-                owner = client.id
-                pair = client.pair or {}
-                if pair.get("to"):
-                    owner = pair["to"]
-                if owner and not session.owner:
-                    session.owner = owner
+                # 两个可见域：在房间里开的终端属于房间（双方平等可见），
+                # 没在房间里的挂在创建者名下（私有域）。
+                # 以前这里是"我在别人桌面里开，就归对方"，那是单向配对时代的产物：
+                # 归属权是关系，不是所有权，房间模型下由 ROOM 字段表达。
+                if client.room:
+                    session.room = client.room
+                    session.owner = ""
+                    room = self.rooms.get(client.room)
+                    if room is not None:
+                        room.sessions.add(sid)
+                elif client.id and not session.owner:
+                    session.owner = client.id
             self.stats["sessions_opened"] += 1
             # 新建的会话带上了归属与编号，立刻落盘。
             self._save_state()
@@ -951,6 +1322,11 @@ class Relay:
                     # 有人主动点了 ×：从缓存里摘掉，并告诉所有控制端"这是关掉的，
                     # 不是断了" —— 他们要把标签留成灰色，而不是继续当活着。
                     self._drop_from_lists(sid)
+                    session = self.sessions.get(sid)
+                    if session is not None and session.room:
+                        room = self.rooms.get(session.room)
+                        if room is not None:
+                            room.sessions.discard(sid)
                     await self.broadcast_ctls(
                         {
                             "type": "SESSION_CLOSED",
@@ -964,7 +1340,12 @@ class Relay:
         await self.send_json(node.ws, {**msg, "src": "ctl"})
 
     async def _detach_client(self, ws: Any) -> None:
-        """一条控制端连接走了：摘掉这条连接；最后一条走了才把这个人从表里删掉。"""
+        """一条控制端连接走了：摘掉这条连接；最后一条走了才把这个人从表里删掉。
+
+        在房间里的人走了，不是"我自己下线"这么简单：房间是强耦合的，一方走另一方也完蛋。
+        这里只进入 **宽限期**（默认 30 秒）——断网重连接得上就当无事发生，超时才关房。
+        这么设计是因为 PTY 会随房间一起销毁，立刻关等于 Wi-Fi 抖一下丢一次工作。
+        """
         client = self.by_ws.pop(ws, None)
         if client is None:
             return
@@ -974,16 +1355,33 @@ class Relay:
             return
 
         gone = client.id
+        room = self._client_room(gone) if gone else None
         self.clients.pop(client.id, None)
-        # 它进的别人、别人进它的配对，一起解除
+        # 它发出的、发给它的邀请，一起作废
         if gone:
-            for other in self.clients.values():
-                if other.pair and other.pair.get("to") == gone:
-                    other.pair = None
+            self.invites.pop(gone, None)
+            for target, invite in list(self.invites.items()):
+                if str(invite.get("from") or "") == gone:
+                    self.invites.pop(target, None)
 
         LOG.info("ctl 下线 %s（剩 %d 条连接）", ws.remote_address, len(self.by_ws))
         # 在线列表就是"此刻连着 wss 的客户端"，走了立刻从列表里消失
         await self.broadcast_clients()
+
+        if room is not None:
+            room.state = "half"
+            peer_id = self._peer_of(room, gone)
+            await self._send_to_client(
+                peer_id,
+                {
+                    "type": "ROOM_PEER_GONE",
+                    "room": room.id,
+                    "grace": ROOM_GRACE_SECONDS,
+                },
+            )
+            self._schedule_room_grace(room.id)
+            await self.broadcast_clients()
+
         if not self.by_ws:
             for node in self.nodes.values():
                 if node.ws is not None:
@@ -1125,6 +1523,23 @@ class Relay:
             self.viewers.pop(cid, None)
             LOG.info("数据通道 %s viewer %s 离开（剩 %d）", token[:8], cid, len(channel.viewers))
             self._drop_channel_if_idle(token)
+
+    async def _close_data_channel(self, token: str, reason: str) -> None:
+        """关掉一条数据通道上的所有 viewer 并摘掉通道。
+
+        会话被销毁时必须走这里：否则 viewer 连接还挂着，画面冻在最后一帧，
+        用户完全看不出后台已经没了。
+        """
+        channel = self.channels.pop(token, None)
+        if channel is None:
+            return
+        for viewer in list(channel.viewers.values()):
+            self.viewers.pop(viewer.cid, None)
+            try:
+                await viewer.ws.close(code=4008, reason=reason)
+            except Exception:  # noqa: BLE001 - 对端可能已经断了
+                pass
+        channel.viewers.clear()
 
     async def _send_bytes(self, ws: Any, chunk: bytes) -> None:
         try:

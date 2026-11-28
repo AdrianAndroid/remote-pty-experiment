@@ -228,13 +228,24 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.relay.sessions["s1"].owner, "c1")
         self.assertEqual(self.relay.sessions["s1"].node, "n1")
 
-    async def test_create_inside_other_client_belongs_to_it(self) -> None:
+    async def open_room(self, a: FakeWS, a_id: str, b: FakeWS, b_id: str) -> None:
+        """走一遍真实的双向握手：邀请 → 对方同意 → 建房。"""
+        await self.feed(a, {"type": "ROOM_INVITE", "to": b_id})
+        await self.feed(b, {"type": "ROOM_ACCEPT"})
+        await self.settle()
+
+    async def test_create_inside_room_belongs_to_room(self) -> None:
+        """房间里开的终端属于房间，不属于某张桌面 —— 两边都看得见，房间外看不到。"""
         await self.agent("n1")
-        mine = await self.client("c1", host="n1")
-        await self.client("c2", host="n1")
-        await self.feed(mine, {"type": "CTL_PAIR", "client": "c2", "node": "n1", "to_name": "c2"})
-        await self.create(mine, sid="s9", token="t9")
-        self.assertEqual(self.relay.sessions["s9"].owner, "c2")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.open_room(a, "c1", b, "c2")
+        await self.create(a, sid="s9", token="t9")
+
+        session = self.relay.sessions["s9"]
+        self.assertEqual(session.room, self.relay.clients["c1"].room)
+        self.assertEqual(session.owner, "", "房间里的终端不该同时挂在某张桌面下")
+        self.assertIn("s9", self.relay.rooms[session.room].sessions)
 
     # ---------------------------------------------------------------- 尺寸仲裁
 
@@ -242,6 +253,8 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         agent = await self.agent("n1")
         creator = await self.client("c1", host="n1")
         mirror = await self.client("c2", host="n1")
+        # 镜像端必须和创建者在同一个房间，否则它连这条会话都收不到 —— 见可见性测试。
+        await self.open_room(creator, "c1", mirror, "c2")
         await self.create(creator, sid="s1", token="t1")
         agent.sent.clear()
 
@@ -263,16 +276,26 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
 
     # ---------------------------------------------------------------- 广播
 
-    async def test_session_list_broadcast_to_every_client(self) -> None:
+    async def test_session_list_is_filtered_by_visibility(self) -> None:
+        """隐私红线：会话列表按可见域分发，别人收不到不属于他的行。
+
+        这是整个房间模型的地基 —— 以前是"所有人一份、客户端自己过滤显示"，
+        那是自觉，不是边界。
+        """
         agent = await self.agent("n1")
         a = await self.client("c1", host="n1")
         b = await self.client("c2", host="n1")
+        c = await self.client("c3", host="n1")
+        await self.create(a, sid="s1", token="t1")
         await self.feed(
             agent,
             {"type": "SESSION_LIST", "sessions": [{"session_id": "s1", "data_token": "t1"}]},
         )
+
         self.assertEqual(a.last("SESSION_LIST")["sessions"][0]["session_id"], "s1")
-        self.assertEqual(b.last("SESSION_LIST")["sessions"][0]["session_id"], "s1")
+        for other in (b, c):
+            rows = other.last("SESSION_LIST")["sessions"]
+            self.assertEqual(rows, [], "不是主人、也不在房间里的人不该收到这条会话")
 
     # ---------------------------------------------------------------- 数据面
 
@@ -337,18 +360,112 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
 
     # ---------------------------------------------------------------- 客户端个体性
 
-    async def test_pairing_visible_both_sides_and_dropped_on_disconnect(self) -> None:
+    async def test_room_is_private_and_both_sides_see_same_sessions(self) -> None:
+        """房间：双向同意才成立，房间内共享，房间外连 sid 都收不到。"""
         await self.agent("n1")
         a = await self.client("c1", "mini-aaaa", "n1")
         b = await self.client("c2", "mbp-bbbb", "n1")
-        await self.feed(a, {"type": "CTL_PAIR", "client": "c2", "node": "n1", "to_name": "mbp-bbbb"})
-        pairs = b.last("CLIENTS")["pairs"]
-        self.assertEqual(pairs, [{"from": "c1", "from_name": "mini-aaaa", "to": "c2", "to_name": "mbp-bbbb", "node": "n1"}])
+        c = await self.client("c3", "other-cccc", "n1")
+
+        # 单向配对已经下线：老客户端会收到一句明确的错误，而不是悄悄塞进别人桌面
+        await self.feed(a, {"type": "CTL_PAIR", "client": "c2", "node": "n1"})
+        self.assertEqual(a.last("ERROR")["code"], "pair_removed")
+
+        await self.open_room(a, "c1", b, "c2")
+        self.assertEqual(a.last("ROOM_OPEN")["peer"]["client"], "c2")
+        self.assertEqual(b.last("ROOM_OPEN")["peer"]["client"], "c1")
+
+        # 第三方只知道"有人在通话"，不知道跟谁
+        card = [x for x in c.last("CLIENTS")["clients"] if x["client"] == "c1"][0]
+        self.assertTrue(card["busy"])
+        self.assertNotIn("to", card)
+        self.assertEqual(c.last("CLIENTS")["pairs"], [])
+
+        # 房间里的终端：两个人都在列表里看得见，第三方一行都收不到
+        await self.create(a, sid="s1", token="t1")
+        await self.feed(
+            self.relay.nodes["n1"].ws,
+            {"type": "SESSION_LIST", "sessions": [{"session_id": "s1", "data_token": "t1"}]},
+        )
+        self.assertEqual(b.last("SESSION_LIST")["sessions"][0]["session_id"], "s1")
+        self.assertEqual(c.last("SESSION_LIST")["sessions"], [])
+
+    async def test_room_closes_for_both_when_one_leaves(self) -> None:
+        """一方离开：另一方立刻收到 ROOM_CLOSED，两人一起回列表，终端销毁。"""
+        agent = await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.open_room(a, "c1", b, "c2")
+        await self.create(a, sid="s1", token="t1")
+        agent.sent.clear()
+
+        await self.feed(b, {"type": "ROOM_LEAVE"})
+        self.assertEqual(a.last("ROOM_CLOSED")["reason"], "left")
+        self.assertEqual(self.relay.rooms, {})
+        self.assertEqual(self.relay.clients["c1"].room, "")
+        self.assertNotIn("s1", self.relay.sessions)
+        self.assertEqual(agent.last("SESSION_CLOSE")["session_id"], "s1")
+
+    async def test_room_grace_allows_reconnect(self) -> None:
+        """断网重连：宽限期内回来，房间继续，对方收到 ROOM_PEER_BACK。"""
+        await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.open_room(a, "c1", b, "c2")
 
         b.end()
         await self.settle()
-        self.assertEqual(self.relay.pairs_summary(), [])
-        self.assertIsNone(self.relay.clients["c1"].pair)
+        self.assertEqual(a.last("ROOM_PEER_GONE")["room"], self.relay.clients["c1"].room)
+        self.assertEqual(self.relay.rooms[self.relay.clients["c1"].room].state, "half")
+
+        again = await self.client("c2", host="n1")
+        await self.settle()
+        room = self.relay.rooms[self.relay.clients["c1"].room]
+        self.assertEqual(room.state, "open")
+        self.assertIsNotNone(a.last("ROOM_PEER_BACK"))
+        # 回来的这一端也要收到 ROOM_OPEN，否则它的界面会停在列表上
+        self.assertTrue(again.last("ROOM_OPEN")["resumed"])
+
+    async def test_room_grace_timeout_tears_down(self) -> None:
+        """宽限期过了还没回来：房间关闭，另一方回列表。"""
+        relay.ROOM_GRACE_SECONDS = 0.05
+        try:
+            await self.agent("n1")
+            a = await self.client("c1", host="n1")
+            b = await self.client("c2", host="n1")
+            await self.open_room(a, "c1", b, "c2")
+            b.end()
+            await asyncio.sleep(0.12)
+            self.assertEqual(a.last("ROOM_CLOSED")["reason"], "peer_timeout")
+            self.assertEqual(self.relay.rooms, {})
+        finally:
+            relay.ROOM_GRACE_SECONDS = 30.0
+
+    async def test_invite_requires_consent_and_is_exclusive(self) -> None:
+        """邀请要对方同意；已经在通话里的人既不能被邀请，也不能去邀请。"""
+        await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        c = await self.client("c3", host="n1")
+
+        # 没同意之前没有任何房间
+        await self.feed(a, {"type": "ROOM_INVITE", "to": "c2"})
+        self.assertEqual(self.relay.rooms, {})
+        self.assertEqual(b.last("ROOM_INVITE")["from"]["client"], "c1")
+
+        # 拒绝就不成立，且邀请方要知道被拒
+        await self.feed(b, {"type": "ROOM_DECLINE"})
+        self.assertEqual(self.relay.rooms, {})
+        self.assertEqual(a.last("ROOM_DECLINED")["by"], "c2")
+
+        # 建好房间后，第三方邀请其中一人：只说"忙"，不说跟谁
+        await self.open_room(a, "c1", b, "c2")
+        await self.feed(c, {"type": "ROOM_INVITE", "to": "c1"})
+        self.assertEqual(c.last("ERROR")["code"], "peer_busy")
+
+        # 房间里的人再去邀请别人：自己先离开
+        await self.feed(a, {"type": "ROOM_INVITE", "to": "c3"})
+        self.assertEqual(a.last("ERROR")["code"], "busy")
 
     async def test_one_client_leaving_does_not_touch_another(self) -> None:
         await self.agent("n1")
@@ -494,6 +611,80 @@ class RelayTest(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertEqual(first.closed[0], 4002)
         self.assertIs(self.relay.nodes["n1"].ws, second)
+
+    async def test_new_connection_does_not_receive_room_sessions(self) -> None:
+        """刚连上的客户端拿到的缓存列表也必须是过滤过的。
+
+        这条是上面隐私红线的补丁：`handle_ctl` 里那条"把 node.last_list 直接甩给新连接"
+        的快路径不经过 broadcast_ctls，漏了过滤就等于把房间里的终端编号报给别人。
+        """
+        agent = await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.open_room(a, "c1", b, "c2")
+        await self.create(a, sid="secret", token="t9")
+        await self.feed(
+            agent, {"type": "SESSION_LIST", "sessions": [{"session_id": "secret", "data_token": "t9"}]}
+        )
+
+        late = await self.client("c3", host="n1")
+        lists = late.of_type("SESSION_LIST")
+        self.assertTrue(lists, "新连接应该收到缓存列表（可能是空表）")
+        for event in lists:
+            ids = [row.get("session_id") for row in (event.get("sessions") or [])]
+            self.assertNotIn("secret", ids)
+
+    async def test_room_session_is_never_claimed_as_private(self) -> None:
+        """房间里的会话不能被"无主认领"逻辑收编成某个人的私有终端。
+
+        `decorate_sessions` 会把没有 owner 的会话认给默认认领者，而房间里的会话
+        恰好 owner 是空的（可见性由 room 决定）。漏了这一条，小黑屋的终端会被写到
+        某张桌面上 —— 状态看不出问题，界面上却直接暴露了。
+        """
+        await self.agent("n1")
+        a = await self.client("c1", host="n1", primary=True)
+        b = await self.client("c2", host="n1")
+        await self.open_room(a, "c1", b, "c2")
+        await self.create(a, sid="secret", token="t9")
+
+        self.assertEqual(self.relay.sessions["secret"].owner, "")
+        self.relay.decorate_sessions(
+            {"type": "SESSION_LIST", "sessions": [{"session_id": "secret"}]}
+        )
+        self.assertEqual(
+            self.relay.sessions["secret"].owner,
+            "",
+            "房间里的会话被认领成了私有终端 —— 这就是泄露",
+        )
+
+    async def test_expired_invite_cannot_be_accepted(self) -> None:
+        """过期的邀请不能被同意：不能替十分钟前的自己决定。"""
+        await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.feed(a, {"type": "ROOM_INVITE", "to": "c2"})
+        self.relay.invites["c2"]["at"] -= relay.ROOM_INVITE_TTL + 5
+        await self.feed(b, {"type": "ROOM_ACCEPT"})
+        self.assertEqual(b.last("ERROR")["code"], "invite_expired")
+        self.assertEqual(self.relay.rooms, {})
+
+    async def test_room_close_shuts_down_data_channel(self) -> None:
+        """关房时数据面要一起收尾：viewer 被关掉，通道被摘掉。
+
+        不收的话，用户看到的是一块冻在最后一帧的黑屏，还以为终端活着。
+        """
+        agent = await self.agent("n1")
+        a = await self.client("c1", host="n1")
+        b = await self.client("c2", host="n1")
+        await self.open_room(a, "c1", b, "c2")
+        await self.create(a, sid="s1", token="t1")
+        await self.open_agent_data("t1")
+        viewer = await self.open_viewer("t1")
+        await self.answer_snapshots(agent)
+
+        await self.feed(a, {"type": "ROOM_LEAVE"})
+        self.assertNotIn("t1", self.relay.channels)
+        self.assertEqual(viewer.closed[0], 4008)
 
 
 if __name__ == "__main__":
