@@ -50,3 +50,14 @@ sudo chown root:root /opt/rpty/chrome-sandbox && sudo chmod 4755 /opt/rpty/chrom
 install -m 755 /usr/share/applications/rpty-desktop.desktop ~/Desktop/rpty.desktop
 gio set ~/Desktop/rpty.desktop metadata::trusted true   # GNOME 才允许双击
 ```
+
+桌面图标/菜单/自启都走同一个启动器脚本，避免「双击没反应」：
+
+```sh
+# /usr/local/bin/rpty-launch
+if pgrep -x rpty-desktop >/dev/null; then exec /opt/rpty/rpty-desktop "$@"; fi   # 已有实例→提窗口
+/opt/rpty/rpty-desktop "$@" >>"$HOME/.cache/rpty/launch.log" 2>&1 & sleep 4
+kill -0 $! 2>/dev/null && wait $! || exec /opt/rpty/rpty-desktop --no-sandbox "$@"
+```
+
+`Exec=/usr/local/bin/rpty-launch %U`；起不来先看 `~/.cache/rpty/launch.log`。
