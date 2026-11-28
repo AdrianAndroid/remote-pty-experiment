@@ -5,7 +5,7 @@
 ## 一、现在的实际形态
 
 ```
-MacBook Pro（随身）               阿里云 8.152.204.58             家里 Mac mini
+MacBook Pro（随身）               云主机 relay.example.com             家里 Mac mini
 ┌──────────────────┐            ┌─────────────────────┐        ┌──────────────────┐
 │ rpty.app         │  wss 443   │ openresty (1Panel)  │  wss   │ rpty_agent.py    │
 │ Electron + xterm │ ─────────▶ │   ↓ 反代             │ ◀───── │ launchd 常驻      │
@@ -40,15 +40,15 @@ MacBook Pro（随身）               阿里云 8.152.204.58             家里 
 
 ## 二、域名与证书
 
-- 域名：`rpty.zhaojian.xin` → `8.152.204.58`（阿里云 A 记录）
-- 证书：Let's Encrypt，`/etc/letsencrypt/live/rpty.zhaojian.xin/`，2027-02-25 到期
+- 域名：`relay.example.com` → 云主机公网 IP（A 记录）。真值见 `ops/local.md`（不入库）
+- 证书：Let's Encrypt，`/etc/letsencrypt/live/relay.example.com/`，2027-02-25 到期
 - 续期：`certbot renew` 自动跑，deploy hook `/etc/letsencrypt/renewal-hooks/deploy/rpty.sh` 会把证书拷到 openresty 的 `conf/ssl/rpty/` 并 reload
 - 签发走 HTTP-01：80 端口那个 nginx 容器把 `/.well-known/acme-challenge/` 转发到 `172.17.0.1:40080`（openresty 上的 acme server）
 
 ## 三、relay（云主机）
 
 ```bash
-cd /opt/1panel/apps/rpty
+cd /opt/rpty
 docker compose ps                 # 应看到 rpty-relay  Up
 docker compose logs -f --tail 50  # 排障
 docker compose restart            # 重启
@@ -56,11 +56,11 @@ docker compose restart            # 重启
 
 - 容器名 `rpty-relay`，`network_mode: host`，监听 `127.0.0.1:8765`
 - `restart: always`，服务器重启自动回来
-- 健康检查：`curl https://rpty.zhaojian.xin/healthz`
+- 健康检查：`curl https://relay.example.com/healthz`
   返回 `{"ok":true,"agent":true,"ctl":false,"sessions_opened":N,...}`
-- token 在 `/opt/1panel/apps/rpty/.env` 的 `RPty_TOKEN`，两端必须一致
+- token 在 `/opt/rpty/.env` 的 `RPty_TOKEN`，两端必须一致
 
-反代配置：`/opt/1panel/www/conf.d/rpty.zhaojian.xin.conf`（443 反代 + WebSocket upgrade + `proxy_read_timeout 3600s`）。
+反代配置：`/opt/1panel/www/conf.d/relay.example.com.conf`（443 反代 + WebSocket upgrade + `proxy_read_timeout 3600s`）。
 
 ## 四、agent（Mac mini）
 
@@ -68,14 +68,14 @@ docker compose restart            # 重启
 
 ```bash
 launchctl list | grep rpty                       # 看是否在跑
-launchctl kickstart -k gui/$(id -u)/xin.zhaojian.rpty-agent   # 重启
-launchctl unload ~/Library/LaunchAgents/xin.zhaojian.rpty-agent.plist   # 停
+launchctl kickstart -k gui/$(id -u)/com.example.rpty-agent   # 重启
+launchctl unload ~/Library/LaunchAgents/com.example.rpty-agent.plist   # 停
 tail -f ~/rpty/agent.log ~/rpty/agent.err.log    # 日志
 ```
 
 - 代码：`~/rpty`（仓库 clone）
 - Python：`~/rpty-venv-test/bin/python`（3.12 + websockets 17）
-- plist：`~/Library/LaunchAgents/xin.zhaojian.rpty-agent.plist`（chmod 600，里面带 token）
+- plist：`~/Library/LaunchAgents/com.example.rpty-agent.plist`（chmod 600，里面带 token）
 
 **已知坑**：launchd 拉起的进程会经 `urllib.getproxies()` 读到 macOS 系统代理（本机 127.0.0.1:7897），websockets 于是尝试走 SOCKS 并报 `requires python-socks`。代码里已用 `proxy=None` 显式绕开，别删。
 
@@ -86,7 +86,7 @@ open /Applications/rpty.app
 ```
 
 - 配置：`~/Library/Application Support/rpty-desktop/rpty-config.json`（chmod 600）
-  内容 `{"url":"wss://rpty.zhaojian.xin","token":"..."}`，首次可在连接页填
+  内容 `{"url":"wss://relay.example.com","token":"..."}`，首次可在连接页填
 - 打包版与开发版共用这个目录（主进程里 `app.setPath('userData', ...)` 固定过）
 - 开发态启动：`cd apps/desktop && ./node_modules/.bin/electron .`
 - 重新打包：`cd apps/desktop && pnpm pack:mac`，产物 `release/mac-arm64/rpty.app`
@@ -96,8 +96,8 @@ open /Applications/rpty.app
 ## 六、升级流程
 
 1. MacBook Pro 改代码 → `git push`
-2. Mac mini：`cd ~/rpty && git pull && launchctl kickstart -k gui/$(id -u)/xin.zhaojian.rpty-agent`
-3. 服务器（改了 relay 时）：把新的 `server/*` 同步到 `/opt/1panel/apps/rpty/`，`docker compose up -d --build`
+2. Mac mini：`cd ~/rpty && git pull && launchctl kickstart -k gui/$(id -u)/com.example.rpty-agent`
+3. 服务器（改了 relay 时）：把新的 `server/*` 同步到 `/opt/rpty/`，`docker compose up -d --build`
 4. 客户端：`pnpm pack:mac`，把 `release/mac-arm64/rpty.app` 覆盖到 `/Applications/`
 
 ## 七、排障对照表

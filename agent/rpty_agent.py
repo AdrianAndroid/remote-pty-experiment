@@ -11,7 +11,7 @@ rpty agent —— 跑在被控 Mac 上，开真实 PTY 并把字节流送到 rel
 会话 token 由控制端生成，agent 原样使用，因此 agent 不需要任何全局状态。
 
 用法：
-    python3 rpty_agent.py --relay wss://rpty.zhaojian.xin --token <TOKEN>
+    python3 rpty_agent.py --relay wss://relay.example.com --token <TOKEN>
 
 环境变量也可以：RPty_RELAY / RPty_TOKEN
 """

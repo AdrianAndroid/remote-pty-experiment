@@ -60,7 +60,7 @@
 
 已跑通的：
 
-- 双节点同时在线（Mac mini + 台式机 `192.168.2.2`）
+- 双节点同时在线（Mac mini + 台式机 `$LAN_HOST`）
 - A 端在台式机上开终端 → `hostname` 回 `zhaojian`、`uname -s` 回 `Linux`
 - B 端在 Mac mini 上开终端 → `hostname` 回 `zhoajiandeMac-mini.local`、`uname -s` 回 `Darwin`
 - 两端镜像同一会话，编号全局唯一

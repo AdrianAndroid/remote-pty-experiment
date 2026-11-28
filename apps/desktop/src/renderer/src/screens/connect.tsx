@@ -107,7 +107,7 @@ export function ConnectScreen({
             value={url}
             spellCheck={false}
             autoCapitalize="none"
-            placeholder="wss://rpty.zhaojian.xin"
+            placeholder="wss://relay.example.com"
             onChange={(event) => setUrl(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter' && canSubmit) onConnect(url.trim(), token.trim())

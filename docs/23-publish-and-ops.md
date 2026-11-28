@@ -37,7 +37,7 @@ rpty 的上游依赖只有两项：
 ## 3. 部署形态
 
 ```
-/opt/1panel/apps/rpty/
+/opt/rpty/
 ├── docker-compose.yml
 ├── Dockerfile
 ├── relay.py            ← 日常发布只覆盖这个文件
@@ -79,7 +79,7 @@ CMD ["python", "-u", "/app/relay.py"]
 
 ## 4. 反代配置
 
-在 1Panel 中为 `rpty.zhaojian.xin` 建站点，location 段必须显式写这几行（默认值会咬人）：
+在 1Panel 中为 `relay.example.com` 建站点，location 段必须显式写这几行（默认值会咬人）：
 
 ```nginx
 location / {
@@ -113,7 +113,7 @@ TLS 由 1Panel 的 Let's Encrypt 自动签发与续期（certbot timer 每日 00
 目录约定：
 
 ```
-/opt/1panel/apps/rpty/releases/
+/opt/rpty/releases/
 ├── 0.1.0/relay.py
 ├── 0.1.1/relay.py
 └── current -> 0.1.1
@@ -122,14 +122,14 @@ TLS 由 1Panel 的 Let's Encrypt 自动签发与续期（certbot timer 每日 00
 ### 5.2 手动发布（应急）
 
 ```bash
-scp relay.py root@8.152.204.58:/opt/1panel/apps/rpty/relay.py.new
-ssh root@8.152.204.58 'cd /opt/1panel/apps/rpty && mv relay.py relay.py.prev && mv relay.py.new relay.py && docker restart rpty-relay'
+scp relay.py root@$RELAY_HOST:/opt/rpty/relay.py.new
+ssh root@$RELAY_HOST 'cd /opt/rpty && mv relay.py relay.py.prev && mv relay.py.new relay.py && docker restart rpty-relay'
 ```
 
 ### 5.3 回滚
 
 ```bash
-ssh root@8.152.204.58 'cd /opt/1panel/apps/rpty && mv relay.py.prev relay.py && docker restart rpty-relay'
+ssh root@$RELAY_HOST 'cd /opt/rpty && mv relay.py.prev relay.py && docker restart rpty-relay'
 ```
 
 3 秒完成。relay 无状态，回滚零代价——重启只断桥，PTY 在两端继续活着。
@@ -146,7 +146,7 @@ ssh root@8.152.204.58 'cd /opt/1panel/apps/rpty && mv relay.py.prev relay.py && 
 | --- | --- |
 | 健康检查 | `GET /healthz` 返回 `{"ok":true,"sessions":N}` |
 | 日志 | 容器 json-file，10 MB × 3 轮转；`docker logs rpty-relay -f` |
-| 内存 | `mem_limit: 256m` 兜底（机器 1.6 GiB 无 swap） |
+| 内存 | `mem_limit: 256m` 兜底（机器小内存、无 swap） |
 | 磁盘 | 镜像 130 MB + 代码 20 KB，机器剩 30 GB |
 | 端口 | 只有 `127.0.0.1:8765`，公网不可见，安全组无需改动 |
 
@@ -154,8 +154,8 @@ ssh root@8.152.204.58 'cd /opt/1panel/apps/rpty && mv relay.py.prev relay.py && 
 
 ## 7. 需要人做一次的事（不在此自动化）
 
-1. 阿里云 DNS 加 `rpty` 的 A 记录 → `8.152.204.58`
-2. 1Panel 建站点 `rpty.zhaojian.xin` + 签证书
+1. DNS 服务商加 `rpty` 的 A 记录 → `relay.example.com`
+2. 1Panel 建站点 `relay.example.com` + 签证书
 3. 1Panel 编排贴 `docker-compose.yml` + 首次 build
 4. 生成 token 写入 `.env`（600）
 5. 补 2 G swapfile（见 `22`，会改生产机系统配置，单独确认）
@@ -166,7 +166,7 @@ ssh root@8.152.204.58 'cd /opt/1panel/apps/rpty && mv relay.py.prev relay.py && 
 
 | 项 | 怎么验 |
 | --- | --- |
-| 公司网络能出站 wss 到 `rpty.zhaojian.xin` | 在公司那台上 `curl -v` 一次握手，或直接跑 P2 |
+| 公司网络能出站 wss 到 `relay.example.com` | 在公司那台上 `curl -v` 一次握手，或直接跑 P2 |
 | 公司机对未签名 Electron 的拦截 | P3 打包后实跑，观察是否被 EDR 静默终止 |
 | 长时间空转不杀进程 | 部署后空转 30 分钟观察 |
 

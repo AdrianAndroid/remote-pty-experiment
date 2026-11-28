@@ -84,19 +84,19 @@
 三件已经跑起来了，完整运维细节见 [docs/25-runbook.md](docs/25-runbook.md)。
 
 ```bash
-# 1. relay（阿里云 8.152.204.58，Docker，已经在跑）
-cd /opt/1panel/apps/rpty && docker compose ps
-curl https://rpty.zhaojian.xin/healthz        # {"ok":true,"agent":true,...}
+# 1. relay（云主机，Docker，已经在跑）
+cd /opt/rpty && docker compose ps
+curl https://relay.example.com/healthz        # {"ok":true,"agent":true,...}
 
 # 2. agent（家里 Mac mini，launchd 常驻，开机自启）
 launchctl list | grep rpty
-launchctl kickstart -k gui/$(id -u)/xin.zhaojian.rpty-agent
+launchctl kickstart -k gui/$(id -u)/com.example.rpty-agent
 
 # 3. 客户端（MacBook Pro）
 open /Applications/rpty.app
 ```
 
-首次运行在连接页填 `wss://rpty.zhaojian.xin` 和 token（服务器 `/opt/1panel/apps/rpty/.env` 里的 `RPty_TOKEN`），之后自动连、自动开一个终端。
+首次运行在连接页填 `wss://relay.example.com` 和 token（服务器 `/opt/rpty/.env` 里的 `RPty_TOKEN`），之后自动连、自动开一个终端。
 
 开发态：
 

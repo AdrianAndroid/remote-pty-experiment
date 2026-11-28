@@ -15,7 +15,7 @@
 
 ```
 客户端 A ─┐
-          ├─▶ wss://rpty.zhaojian.xin ─▶ agent(Mac mini) ─▶ 同一个 zsh
+          ├─▶ wss://relay.example.com ─▶ agent(Mac mini) ─▶ 同一个 zsh
 客户端 B ─┘        (relay 多播)              (PTY 宿主)
 ```
 
@@ -31,7 +31,7 @@
 | 2 | 同一 shell 进程 | 两端 `echo $$` | 都是 `80327` |
 | 3 | 输出多播 | A 敲 → B 看 | B 秒出，含提示符与滚动位置 |
 | 4 | 输入多播 | B 敲 → A 看 | A 秒出 `I-AM-THE-OWNER 80327` |
-| 5 | 走的是真公网 | `lsof -i :443` | 每个客户端 6 条 ESTABLISHED → `8.152.204.58` |
+| 5 | 走的是真公网 | `lsof -i :443` | 每个客户端 6 条 ESTABLISHED → `relay.example.com` |
 | 6 | 标签归属 | 目视 | A 的「终端 3」无徽标；B 的三个全带「共享」 |
 | 7 | 全局编号 | 两端对照 | A/B 的「终端 3」是同一会话 |
 | 8 | 镜像端不串行 | 目视 | 锁尺寸后 B 与 A 逐字一致，无重叠错行 |
@@ -77,7 +77,7 @@ agent 维护全局 `seq`，`SESSION_LIST` 每项带 `index`。客户端不再自
 
 按优先级：
 
-- [ ] **真跨机器**：Mac mini 客户端 ↔ 局域网 Ubuntu 台式机（`192.168.2.2`）当 agent。台式机侧已就绪，未实跑。
+- [ ] **真跨机器**：Mac mini 客户端 ↔ 局域网 Ubuntu 台式机（`$LAN_HOST`）当 agent。台式机侧已就绪，未实跑。
 - [ ] **客户端打 x64 `.app`**：`pack:mac` 当前只配 arm64，本机是 Intel。
 - [ ] **owner 交接**：让尺寸控制权能在客户端之间转移，顺带解决 §4 第 1 条。
 - [ ] 清理 `pair_timeout` 死代码。
@@ -89,7 +89,7 @@ agent 维护全局 `seq`，`SESSION_LIST` 每项带 `index`。客户端不再自
 
 ```bash
 # 宿主（Mac mini）
-launchctl kickstart -k gui/$(id -u)/xin.zhaojian.rpty-agent
+launchctl kickstart -k gui/$(id -u)/com.example.rpty-agent
 tail -f ~/rpty/agent.err.log        # 注意是 .err.log
 
 # 客户端 A
@@ -100,7 +100,7 @@ RPTY_USERDATA="$HOME/Library/Application Support/rpty-desktop-b" \
   ./node_modules/.bin/electron .
 
 # 看链路状态
-curl -s https://rpty.zhaojian.xin/healthz
+curl -s https://relay.example.com/healthz
 ```
 
 细节与坑见 `25-runbook.md`。

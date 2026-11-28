@@ -208,7 +208,7 @@
 │             右键粘贴     [x]                                                 │
 │             响铃         ( ) 无   (●) 视觉   ( ) 声音                        │
 │                                                                              │
-│   连接      中继地址     wss://rpty.zhaojian.xin                             │
+│   连接      中继地址     wss://relay.example.com                              │
 │             本机标识     a3f9 c1d2 7e4b        [复制]  [重新生成]            │
 │             自动重连     [x]   间隔  1s  2s  4s  8s                          │
 │             后台保活     [x]   关窗口不结束会话                              │
@@ -232,7 +232,7 @@
 │   ● ● ●   remote-pty · 诊断                         ⌘K   ⌘?   ⚙              │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │   连接                                                                       │
-│     中继        wss://rpty.zhaojian.xin       已连接 · TLS 1.3               │
+│     中继        wss://relay.example.com       已连接 · TLS 1.3                │
 │     RTT         7.8 ms   ▁▂▂▃▂▂▁▂▃▃▂▁▂▂▃▂▁▂▂▃▂▂▁▂▃   最近 60 秒              │
 │     抖动        0.7 ms                                                       │
 │     吞吐        上行 1.2 KB/s     下行 14.8 KB/s                             │
@@ -301,7 +301,7 @@ RTT 用 sparkline 不画坐标系，日常只需一眼看出"有没有跳"。
 │   完整指纹    SHA256:3f9a1c…8b2e             [复制]                          │
 │   公钥        ed25519:dGVzdC1r…              [导出]                          │
 │                                                                              │
-│   中继        wss://rpty.zhaojian.xin                                        │
+│   中继        wss://relay.example.com                                         │
 │   Electron    45.5.0                                                         │
 │   Chromium    140.0.7339.80                                                  │
 │   Node        22.23.2                                                        │

@@ -44,3 +44,6 @@ openspec/.cache/
 
 # 测试中间产物（apps/desktop/test 编译输出）
 .tmp/
+
+# 本机运维真值（真实域名 / IP / 路径只放这里，绝不入库）
+ops/local.md

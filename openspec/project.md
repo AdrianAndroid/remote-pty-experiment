@@ -53,7 +53,7 @@ openspec/       需求规格与变更
 
 - 两端 Mac 芯片可能不同（Intel / Apple Silicon），客户端产物须为 universal 或分别分发。
 - 公司网络对出站 443 放行，对隧道路由与异常长连接有审计。
-- 云主机为阿里云 ECS `8.152.204.58`（Ubuntu 22.04 / 2 vCPU / 1.6 GiB / 无 swap），已运行 4 个容器与 Next.js 服务，内存是唯一紧张资源。
+- 云主机为阿里云 ECS（Ubuntu 22.04 / 2 vCPU / 小内存），除 relay 外还跑着几个无关容器与一个前端服务，内存是唯一紧张资源。真值见 `ops/local.md`（不入库）。
 - 443 已由 1Panel-openresty 持有，新服务须以独立 vhost 接入，不得占用 frps 的 50000–59999 端口池。
 
 ## Important Constraints
@@ -68,7 +68,7 @@ openspec/       需求规格与变更
 ## External Dependencies
 
 - 云主机：公网 IP、443、1Panel-openresty、Docker、Python 3.10
-- 域名 `rpty.zhaojian.xin` 及其 Let's Encrypt 证书（自动续期）
+- 域名 `relay.example.com` 及其 Let's Encrypt 证书（自动续期）
 - 公司 Mac：能出站 443，能运行未签名/已签名 Electron 应用
 - 家 Mac：同客户端
 
