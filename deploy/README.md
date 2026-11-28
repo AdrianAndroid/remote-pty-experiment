@@ -42,3 +42,11 @@ curl -s https://relay.example.com/healthz
 装完把 relay 地址写进 `~/.config/rpty-desktop/rpty-config.json`
 （`{"url": "wss://relay.example.com", "token": "..."}`，0600），
 首次启动就会直接连上。
+
+装完两条收尾（否则 Electron 起不来 / 桌面上双击被拦）：
+
+```bash
+sudo chown root:root /opt/rpty/chrome-sandbox && sudo chmod 4755 /opt/rpty/chrome-sandbox
+install -m 755 /usr/share/applications/rpty-desktop.desktop ~/Desktop/rpty.desktop
+gio set ~/Desktop/rpty.desktop metadata::trusted true   # GNOME 才允许双击
+```
